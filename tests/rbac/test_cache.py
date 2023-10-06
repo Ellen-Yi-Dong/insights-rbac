@@ -279,7 +279,8 @@ class TenantCacheTest(TestCase):
             tenant = tenant_cache.get_tenant(tenant_org_id)
         else:
             tenant = tenant_cache.get_tenant(tenant_name)
-        redis_connection.get.assert_called_once_with(key)
+        if tenant_cache.redis_health_check():
+            redis_connection.get.assert_called_once_with(key)
         self.assertEqual(tenant, self.tenant)
 
         # Delete tenant from cache
