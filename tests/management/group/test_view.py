@@ -827,6 +827,7 @@ class GroupViewsetTests(IdentityRequest):
         return_value={"status_code": 200, "data": [{"username": "test_add_user"}]},
     )
     @patch("core.kafka.RBACProducer.send_kafka_message")
+    #add Audit Log unit tests here 
     def test_add_group_principals_success(self, send_kafka_message, mock_request):
         """Test that adding a principal to a group returns successfully."""
         # Create a group and a cross account user.
@@ -1729,6 +1730,7 @@ class GroupViewsetTests(IdentityRequest):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
     @patch("core.kafka.RBACProducer.send_kafka_message")
+    #Audit Log Test here
     def test_add_group_multiple_roles_success(self, send_kafka_message):
         """Test that adding multiple roles to a group returns successfully."""
         kafka_mock = copy_call_args(send_kafka_message)
