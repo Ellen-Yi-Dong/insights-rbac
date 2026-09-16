@@ -9,6 +9,7 @@ tags:
   - name: Audit Logs
   - name: Principals
   - name: Permissions
+  - name: Groups
 paths:
   /auditlogs/:
     get:
@@ -2287,6 +2288,154 @@ components:
         **Examples:**
         - `id,name`
         - `subject(group.name),role(name)`
+    GroupScope:
+      type: string
+      enum:
+        - org_id
+        - principal
+      description: Group scope filter for controlling group visibility
+    Groups.AddPrincipalsInput:
+      anyOf:
+        - $ref: '#/components/schemas/Groups.AddUsernamesInput'
+        - $ref: '#/components/schemas/Groups.AddServiceAccountsInput'
+      description: Principals to add to a group. At least one of usernames or service_accounts must be present and non-empty; an empty object is rejected.
+    Groups.AddServiceAccountsInput:
+      type: object
+      required:
+        - service_accounts
+      properties:
+        usernames:
+          type: array
+          items:
+            type: string
+          minItems: 1
+          description: Usernames to add.
+        service_accounts:
+          type: array
+          items:
+            type: string
+          minItems: 1
+          description: Service account client IDs to add. Must contain at least one item.
+          example:
+            - abc-123-def
+      description: Add principals by service account client ID. usernames may also be supplied.
+    Groups.AddUsernamesInput:
+      type: object
+      required:
+        - usernames
+      properties:
+        usernames:
+          type: array
+          items:
+            type: string
+          minItems: 1
+          description: Usernames to add. Must contain at least one item.
+        service_accounts:
+          type: array
+          items:
+            type: string
+          minItems: 1
+          description: Service account client IDs to add.
+          example:
+            - abc-123-def
+      description: Add principals by username. service_accounts may also be supplied.
+    Groups.Group:
+      type: object
+      required:
+        - uuid
+        - name
+        - principal_count
+        - role_count
+        - created
+        - modified
+        - system
+        - platform_default
+        - admin_default
+      properties:
+        uuid:
+          allOf:
+            - $ref: '#/components/schemas/UUID'
+          description: UUID that uniquely identifies the group
+        name:
+          type: string
+          minLength: 1
+          maxLength: 150
+          description: Name of the group
+        description:
+          type: string
+          maxLength: 1000
+          description: Description of the group
+        principal_count:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Number of user principals in the group (does not count service accounts, matching V1 principalCount semantics)
+        role_count:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Number of roles assigned to this group via role bindings
+        created:
+          type: string
+          format: date-time
+          description: '2019-01-21T17:32:28Z'
+        modified:
+          type: string
+          format: date-time
+          description: '2019-01-21T17:32:28Z'
+        system:
+          type: boolean
+          description: Whether this is a system-managed group
+        platform_default:
+          type: boolean
+          description: Whether this is the platform default group
+        admin_default:
+          type: boolean
+          description: Whether this is the admin default group
+    Groups.GroupInput:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 150
+          description: Name of the group
+        description:
+          type: string
+          maxLength: 1000
+          description: Description of the group
+    Groups.GroupListResponse:
+      type: object
+      required:
+        - meta
+        - links
+        - data
+      properties:
+        meta:
+          $ref: '#/components/schemas/OffsetPaginationMeta'
+        links:
+          $ref: '#/components/schemas/OffsetPaginationLinks'
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Groups.Group'
+    Groups.PrincipalListResponse:
+      type: object
+      required:
+        - meta
+        - links
+        - data
+      properties:
+        meta:
+          $ref: '#/components/schemas/OffsetPaginationMeta'
+        links:
+          $ref: '#/components/schemas/OffsetPaginationLinks'
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Principal'
     Limit:
       type: integer
       format: int64
@@ -2515,15 +2664,32 @@ components:
         group_count:
           type: integer
           format: int32
-          minimum: 0
           description: Number of groups the principal belongs to
+        display_name:
+          type: string
+          description: Display name of the service account. Only present for service-account principals.
+        description:
+          type: string
+          nullable: true
+          description: Description of the service account. Only present for service-account principals.
+        owner:
+          type: string
+          description: Owner username of the service account. Only present for service-account principals.
+        time_created:
+          type: integer
+          format: int64
+          description: Unix timestamp when the service account was created. Only present for service-account principals.
       example:
-        uuid: 550e8400-e29b-41d4-a716-446655440002
-        username: jdoe
-        type: user
-        user_id: '12345'
-        service_account_id: null
-        group_count: 3
+        uuid: 660e8400-e29b-41d4-a716-446655440003
+        username: service-account-abc123
+        type: service-account
+        user_id: null
+        service_account_id: abc123
+        group_count: 1
+        display_name: My Service Account
+        description: Automation service account
+        owner: jdoe
+        time_created: 1700000000
     PrincipalListResponse:
       type: object
       required:
@@ -2545,6 +2711,13 @@ components:
         - user
         - service-account
       description: Principal type
+    PrincipalTypeFilter:
+      type: string
+      enum:
+        - user
+        - service-account
+        - all
+      description: Principal type filter for listing principals. Extends PrincipalType with 'all' to return both users and service accounts.
     Problems.Problem400:
       type: object
       required:
@@ -2703,6 +2876,40 @@ components:
             instance:
               type: string
               format: uri
+    Problems.Problem409:
+      type: object
+      required:
+        - type
+        - title
+        - detail
+      properties:
+        type:
+          type: string
+          enum:
+            - http://project-kessel.org/problems/conflict
+        title:
+          type: string
+          enum:
+            - The request conflicts with the current state of the resource.
+        detail:
+          type: string
+          example: Cannot delete group with active role bindings.
+      allOf:
+        - type: object
+          properties:
+            type:
+              $ref: '#/components/schemas/Problems.ProblemType'
+            status:
+              type: number
+              enum:
+                - 409
+            title:
+              type: string
+            detail:
+              type: string
+            instance:
+              type: string
+              format: uri
     Problems.Problem500:
       type: object
       required:
@@ -2778,6 +2985,7 @@ components:
         - http://project-kessel.org/problems/already-exists
         - http://project-kessel.org/problems/workspace-not-empty
         - http://project-kessel.org/problems/service-unavailable
+        - http://project-kessel.org/problems/conflict
     Problems.Workspace.Problem400WorkspaceNotEmpty:
       type: object
       required:
@@ -3162,6 +3370,12 @@ components:
           description: User details
       allOf:
         - $ref: '#/components/schemas/RoleBindings.BaseSubject'
+    RoleDiscriminator:
+      type: string
+      enum:
+        - any
+        - all
+      description: Role name matching discriminator for the role_names filter
     Roles.BatchDeleteRolesRequest:
       type: object
       required:
