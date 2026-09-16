@@ -23,10 +23,9 @@ from management.audit_log.v2_serializer import (
     AuditLogV2OutputSerializer,
     validate_fields_parameter,
 )
+from management.audit_log.v2_service import AuditLogV2Service
 from management.base_viewsets import BaseV2ViewSet
 from management.permissions.auditlog_v2_access import AuditLogV2KesselAccessPermission
-from management.utils import filter_queryset_by_tenant
-from management.v2_filters import v2_name_filter
 
 from api.common.pagination import V2CursorPagination
 
@@ -53,7 +52,7 @@ class AuditLogV2ViewSet(BaseV2ViewSet):
 
     def get_queryset(self):
         """Return the requesting tenant's audit log entries, newest first."""
-        return filter_queryset_by_tenant(AuditLog.objects.all(), self.request.tenant).order_by("-created")
+        return AuditLogV2Service(tenant=self.request.tenant).base_queryset()
 
     def list(self, request, *args, **kwargs):
         """List the tenant's audit log entries with optional filtering."""
@@ -63,37 +62,9 @@ class AuditLogV2ViewSet(BaseV2ViewSet):
 
         fields = validate_fields_parameter(request.query_params.get("fields", "").replace("\x00", ""))
 
-        queryset = self._apply_filters(self.get_queryset(), validated)
+        service = AuditLogV2Service(tenant=request.tenant)
+        queryset = service.list(validated)
 
         page = self.paginate_queryset(queryset)
         serializer = AuditLogV2OutputSerializer(page, many=True, context={"request": request, "fields": fields})
         return self.get_paginated_response(serializer.data)
-
-    @staticmethod
-    def _apply_filters(queryset, validated):
-        """Apply the validated list query parameters to the queryset."""
-        principal_username = validated.get("principal_username")
-        if principal_username:
-            queryset = v2_name_filter(queryset, principal_username, field="principal_username")
-
-        resource_type = validated.get("resource_type")
-        if resource_type:
-            queryset = queryset.filter(resource_type=resource_type)
-
-        resource_id = validated.get("resource_id")
-        if resource_id:
-            queryset = queryset.filter(resource_uuid=resource_id)
-
-        action = validated.get("action")
-        if action:
-            queryset = queryset.filter(action=action)
-
-        created_after = validated.get("created_after")
-        if created_after:
-            queryset = queryset.filter(created__gte=created_after)
-
-        created_before = validated.get("created_before")
-        if created_before:
-            queryset = queryset.filter(created__lte=created_before)
-
-        return queryset
