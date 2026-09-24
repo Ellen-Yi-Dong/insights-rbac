@@ -398,6 +398,20 @@ class GroupV2ListAdvancedFiltersViewTest(GroupV2ViewTestBase):
         self.assertEqual(group["principal_count"], 2)
         self.assertEqual(group["role_count"], 2)
 
+    def test_role_names_rejects_too_many_entries(self):
+        """role_names with more than the allowed number of comma-separated entries is rejected."""
+        response = self._list(role_names=",".join(f"role_{i}" for i in range(51)))
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.json()["errors"][0]["field"], "role_names")
+
+    def test_role_names_dedupes_before_enforcing_entry_cap(self):
+        """Repeated role_names entries count once against the entry cap, not per raw occurrence."""
+        response = self._list(role_names=",".join(["role_1"] * 60))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self._names(response), ["alpha"])
+
     def test_filter_by_empty_role_names_is_ignored(self):
         """A role_names value with no names does not filter."""
         response = self._list(role_names=" , ")
@@ -448,6 +462,20 @@ class GroupV2ListAdvancedFiltersViewTest(GroupV2ViewTestBase):
         response = self._list(principals="service-account-abc")
 
         self.assertEqual(self._names(response), [])
+
+    def test_principals_rejects_too_many_entries(self):
+        """principals with more than the allowed number of comma-separated entries is rejected."""
+        response = self._list(principals=",".join(f"user_{i}" for i in range(51)))
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.json()["errors"][0]["field"], "principals")
+
+    def test_principals_dedupes_before_enforcing_entry_cap(self):
+        """Repeated principals entries count once against the entry cap, not per raw occurrence."""
+        response = self._list(principals=",".join(["user_1"] * 60))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertCountEqual(self._names(response), ["alpha", "beta"])
 
     def test_filter_by_empty_principals_is_ignored(self):
         """A principals value with no usernames does not filter."""
