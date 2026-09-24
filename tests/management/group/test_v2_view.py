@@ -501,6 +501,21 @@ class GroupV2ListAdvancedFiltersViewTest(GroupV2ViewTestBase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(self._names(response), [])
 
+    def test_username_and_principals_ignore_cross_tenant_principal_link(self):
+        """A group whose principals M2M links to a cross-tenant Principal never matches on that principal."""
+        other_tenant = self._other_tenant()
+        cross_tenant_principal = Principal.objects.create(username="cross_tenant_user", tenant=other_tenant)
+        self.group_b.principals.add(cross_tenant_principal)
+
+        response = self._list(username="cross_tenant_user")
+        self.assertEqual(self._names(response), [])
+
+        response = self._list(principals="cross_tenant_user")
+        self.assertEqual(self._names(response), [])
+
+        response = self._list(scope="principal")
+        self.assertNotIn("beta", self._names(response))
+
     def test_scope_org_id_returns_all_groups(self):
         """scope=org_id (the default) does not filter."""
         response = self._list(scope="org_id")
@@ -983,6 +998,18 @@ class GroupV2ServiceQueryTest(GroupV2ViewTestBase):
         with self.assertNumQueries(1):
             groups = list(service.list({}))
         self.assertTrue(all(hasattr(g, "principal_count_annotation") for g in groups))
+
+    def test_scope_principal_with_falsy_requester_username_returns_nothing(self):
+        """scope=principal returns an empty queryset (not an error) when requester_username is falsy.
+
+        This can happen for callers without a normal user identity, e.g. a PSK/service-to-service caller.
+        """
+        service = GroupV2Service(tenant=self.tenant)
+
+        for falsy_username in (None, ""):
+            with self.subTest(requester_username=falsy_username):
+                queryset = service.list({"scope": GroupV2Service.PRINCIPAL_SCOPE}, requester_username=falsy_username)
+                self.assertEqual(list(queryset), [])
 
 
 class GroupV2AccessPermissionTest(IdentityRequest):

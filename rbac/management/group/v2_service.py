@@ -89,14 +89,16 @@ class GroupV2Service:
         # Filters traversing principals or role bindings join multi-valued relations, so .distinct() prevents
         # duplicate groups. The count annotations use Count(distinct=True) and are unaffected by the extra joins.
         # All principal-based filters restrict to Principal.Types.USER to match principal_count_annotation --
-        # service accounts share the username field but are excluded from that count.
+        # service accounts share the username field but are excluded from that count. Each also pins
+        # principals__tenant=F("tenant") so a cross-tenant Principal can never match even if the group's
+        # principals M2M were ever mistakenly linked across tenants.
         username = params.get("username")
         if username:
             queryset = v2_name_filter(
                 queryset,
                 username,
                 field="principals__username",
-                extra_filters={"principals__type": Principal.Types.USER},
+                extra_filters={"principals__type": Principal.Types.USER, "principals__tenant": F("tenant")},
             ).distinct()
 
         exclude_username = params.get("exclude_username")
@@ -117,7 +119,11 @@ class GroupV2Service:
         # Chain one filter per principal so a group must contain all of them.
         principals = params.get("principals") or ()
         for principal in principals:
-            queryset = queryset.filter(principals__type=Principal.Types.USER, principals__username__iexact=principal)
+            queryset = queryset.filter(
+                principals__type=Principal.Types.USER,
+                principals__username__iexact=principal,
+                principals__tenant=F("tenant"),
+            )
         if principals:
             queryset = queryset.distinct()
 
@@ -125,7 +131,9 @@ class GroupV2Service:
             if not requester_username:
                 return queryset.none()
             queryset = queryset.filter(
-                principals__type=Principal.Types.USER, principals__username__iexact=requester_username
+                principals__type=Principal.Types.USER,
+                principals__username__iexact=requester_username,
+                principals__tenant=F("tenant"),
             ).distinct()
 
         for flag in ("system", "platform_default", "admin_default"):
