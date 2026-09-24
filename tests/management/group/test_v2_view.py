@@ -292,9 +292,26 @@ class GroupV2ListAdvancedFiltersViewTest(GroupV2ViewTestBase):
 
     def test_filter_by_username_glob(self):
         """username supports '*' glob patterns."""
-        response = self._list(username="service-*")
+        response = self._list(username="user_*")
 
-        self.assertEqual(self._names(response), ["alpha"])
+        self.assertEqual(self._names(response), ["alpha", "beta"])
+
+    def test_filter_by_username_excludes_service_accounts(self):
+        """username only matches user-type principals, not service accounts sharing the field."""
+        response = self._list(username="service-account-abc")
+
+        self.assertEqual(self._names(response), [])
+
+    def test_filter_by_wildcard_username_still_excludes_service_account_only_groups(self):
+        """username='*' matches every name but still requires a user-type principal, per its documented scope."""
+        service_only = Group.objects.create(name="service-only", tenant=self.tenant)
+        service_only.principals.add(self.service_account)
+
+        response = self._list(username="*")
+
+        names = self._tenant_group_names(response)
+        self.assertCountEqual(names, ["alpha", "beta"])
+        self.assertNotIn("service-only", names)
 
     def test_filter_by_blank_username_is_ignored(self):
         """A blank username does not filter."""
@@ -323,6 +340,12 @@ class GroupV2ListAdvancedFiltersViewTest(GroupV2ViewTestBase):
 
         self.assertEqual(self._names(response), ["empty", "other"])
         self.assertEqual(response.json()["meta"]["count"], 2)
+
+    def test_exclude_username_ignores_service_accounts(self):
+        """exclude_username only matches user-type principals, so a service account username has no effect."""
+        response = self._list(exclude_username="service-account-abc")
+
+        self.assertEqual(self._tenant_group_names(response), ["alpha", "beta"])
 
     def test_username_and_exclude_username_are_mutually_exclusive(self):
         """Supplying both username and exclude_username is rejected with 400 Problem JSON."""
@@ -420,6 +443,12 @@ class GroupV2ListAdvancedFiltersViewTest(GroupV2ViewTestBase):
         self.assertEqual(group["principal_count"], 2)
         self.assertEqual(group["role_count"], 2)
 
+    def test_filter_by_principals_excludes_service_accounts(self):
+        """principals only matches user-type principals, not service accounts sharing the username field."""
+        response = self._list(principals="service-account-abc")
+
+        self.assertEqual(self._names(response), [])
+
     def test_filter_by_empty_principals_is_ignored(self):
         """A principals value with no usernames does not filter."""
         response = self._list(principals=",")
@@ -474,6 +503,21 @@ class GroupV2ListAdvancedFiltersViewTest(GroupV2ViewTestBase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(self._names(response), ["alpha"])
 
+    def test_username_principals_and_role_names_combined_keep_counts(self):
+        """Three join-multiplying filters combined still resolve to one row with correct count annotations."""
+        response = self._list(
+            username="user_2",
+            principals="user_1,user_2",
+            role_names="role_1,role_2",
+            role_discriminator="all",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self._names(response), ["alpha"])
+        group = response.json()["data"][0]
+        self.assertEqual(group["principal_count"], 2)
+        self.assertEqual(group["role_count"], 2)
+
     def test_filters_exclude_other_tenant_groups(self):
         """Principal and role filters never return another tenant's groups."""
         other_tenant = self._other_tenant()
@@ -488,6 +532,7 @@ class GroupV2ListAdvancedFiltersViewTest(GroupV2ViewTestBase):
 
         cases = (
             {"username": "user_1"},
+            {"exclude_username": "user_1"},
             {"principals": "user_1"},
             {"role_names": "role_1"},
             {"role_names": "role_1", "role_discriminator": "all"},
