@@ -17,14 +17,23 @@
 """View for GroupV2 management."""
 
 import logging
+from functools import wraps
 
 from django.db import transaction
 from management.atomic_transactions import atomic_block
 from management.audit_log.model import AuditLog
 from management.base_viewsets import BaseV2ViewSet
-from management.group.v2_exceptions import GroupAlreadyExistsError, GroupHasRoleBindingsError, ProtectedGroupError
+from management.group.v2_exceptions import (
+    GroupAlreadyExistsError,
+    GroupHasRoleBindingsError,
+    PrincipalNotFoundError,
+    ProtectedGroupError,
+)
 from management.group.v2_serializer import (
+    GroupV2AddPrincipalsInputSerializer,
     GroupV2ListInputSerializer,
+    GroupV2ListPrincipalsInputSerializer,
+    GroupV2RemovePrincipalsInputSerializer,
     GroupV2RequestSerializer,
     GroupV2ResponseSerializer,
 )
@@ -32,14 +41,35 @@ from management.group.v2_service import GroupV2Service
 from management.notifications.notification_handlers import group_obj_change_notification_handler
 from management.permissions.group_v2_access import GroupV2KesselAccessPermission
 from management.permissions.v2_edit_api_access import V2WriteRequiresWorkspacesEnabled
+from management.principal.backfill import backfill_remote_principals
+from management.principal.proxy import PrincipalProxy, external_principal_to_user
+from management.principal.v2_serializer import PrincipalV2OutputSerializer
+from management.relation_replicator.outbox_replicator import OutboxReplicator
+from management.tenant_service import get_tenant_bootstrap_service
 from management.utils import v2response_error_from_errors
 from management.v2_mixins import AtomicOperationsMixin
 from rest_framework import status
+from rest_framework.decorators import action
 from rest_framework.response import Response
 
 logger = logging.getLogger(__name__)
 
 ALREADY_EXISTS_PROBLEM_TYPE = "http://project-kessel.org/problems/already-exists"
+
+
+def _catch_principal_errors(fn):
+    """Translate ProtectedGroupError/PrincipalNotFoundError into their HTTP error responses."""
+
+    @wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        try:
+            return fn(self, *args, **kwargs)
+        except ProtectedGroupError as e:
+            return self._error_response(e, status.HTTP_400_BAD_REQUEST)
+        except PrincipalNotFoundError as e:
+            return self._error_response(e, status.HTTP_404_NOT_FOUND)
+
+    return wrapper
 
 
 class GroupV2ViewSet(AtomicOperationsMixin, BaseV2ViewSet):
@@ -65,7 +95,9 @@ class GroupV2ViewSet(AtomicOperationsMixin, BaseV2ViewSet):
         input_serializer = GroupV2ListInputSerializer(data=request.query_params)
         input_serializer.is_valid(raise_exception=True)
 
-        queryset = GroupV2Service(tenant=request.tenant).list(input_serializer.validated_data)
+        queryset = GroupV2Service(tenant=request.tenant).list(
+            input_serializer.validated_data, requester_username=request.user.username
+        )
 
         page = self.paginate_queryset(queryset)
         serializer = GroupV2ResponseSerializer(page, many=True)
@@ -138,6 +170,151 @@ class GroupV2ViewSet(AtomicOperationsMixin, BaseV2ViewSet):
 
         self._log_success(request, "V2 Group deleted", "DELETE", group)
         self._send_notification(request, group, "deleted")
+
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=True, methods=["get", "post", "delete"], url_path="principals")
+    def principals(self, request, uuid=None):
+        """List, bulk-add, or bulk-remove a group's member principals, dispatched by HTTP method."""
+        if request.method == "GET":
+            return self._list_principals(request, uuid)
+        if request.method == "POST":
+            return self._add_principals_to_group(request, uuid)
+        return self._atomic_action(self._perform_remove_principals_bulk, "remove_principals_bulk", request, uuid=uuid)
+
+    @action(detail=True, methods=["delete"], url_path=r"principals/(?P<principal_uuid>[0-9a-f-]+)")
+    def remove_principal(self, request, uuid=None, principal_uuid=None):
+        """Remove a single principal from a group by principal UUID."""
+        return self._atomic_action(
+            self._perform_remove_principal, "remove_principal", request, uuid=uuid, principal_uuid=principal_uuid
+        )
+
+    def _list_principals(self, request, uuid=None):
+        """List the group's member principals with optional filtering."""
+        group = self.get_object()
+        input_serializer = GroupV2ListPrincipalsInputSerializer(data=request.query_params)
+        input_serializer.is_valid(raise_exception=True)
+
+        service = GroupV2Service(tenant=request.tenant)
+        queryset = service.list_principals(group, input_serializer.validated_data)
+
+        page = self.paginate_queryset(queryset)
+        serializer = PrincipalV2OutputSerializer(page, many=True)
+        return self.get_paginated_response(serializer.data)
+
+    def _add_principals_to_group(self, request, uuid=None):
+        """Add principals to a group, validating user principals via BOP before persisting.
+
+        Follows the V1 parity pattern: validate user principals against the BOP proxy *outside*
+        the SERIALIZABLE transaction (to avoid holding open a long transaction during the external
+        call), backfill any missing local Principal records, and then persist the group membership
+        change inside the retryable atomic block.
+        """
+        serializer = GroupV2AddPrincipalsInputSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        usernames = set(serializer.validated_data.get("usernames") or [])
+        service_account_client_ids = set(serializer.validated_data.get("service_accounts") or [])
+
+        # Validate user principals against BOP before opening the DB transaction (V1 parity).
+        if usernames:
+            error_response = self._validate_and_backfill_users(request, usernames)
+            if error_response is not None:
+                return error_response
+
+        return self._atomic_action(
+            self._perform_add_principals,
+            "add_principals",
+            request,
+            uuid=uuid,
+            usernames=usernames,
+            service_account_client_ids=service_account_client_ids,
+        )
+
+    def _validate_and_backfill_users(self, request, usernames):
+        """Validate usernames against BOP and backfill local Principal records.
+
+        Returns an error Response if validation fails, or None on success.
+        """
+        proxy = PrincipalProxy()
+        proxy_response = proxy.request_filtered_principals(
+            list(usernames),
+            org_id=request.user.org_id,
+            limit=len(usernames),
+            options={"return_id": True},
+        )
+        if isinstance(proxy_response, dict) and "errors" in proxy_response:
+            detail = proxy_response["errors"][0].get("detail", "Principal proxy validation failed")
+            return self._error_response(
+                Exception(detail),
+                proxy_response.get("status_code", status.HTTP_502_BAD_GATEWAY),
+            )
+
+        bop_data = proxy_response.get("data", [])
+        found_usernames = {u["username"].lower() for u in bop_data}
+        missing = usernames - found_usernames
+        if missing:
+            return self._error_response(
+                PrincipalNotFoundError(sorted(missing)),
+                status.HTTP_404_NOT_FOUND,
+            )
+
+        # Backfill: ensure all BOP-validated users have local Principal records.
+        users = [external_principal_to_user(item) for item in bop_data]
+        bootstrap_service = get_tenant_bootstrap_service(OutboxReplicator())
+        backfill_remote_principals(bootstrap_service, users, request.tenant)
+
+        return None
+
+    @_catch_principal_errors
+    def _perform_add_principals(self, request, uuid=None, usernames=None, service_account_client_ids=None):
+        """Persist pre-validated principals into a group inside an atomic transaction."""
+        service = GroupV2Service(tenant=request.tenant)
+        with atomic_block():
+            group = self.get_object()
+
+            # Only principals whose membership actually changed are returned (already-member
+            # identifiers resolve successfully but are excluded), so this only audit-logs new additions.
+            principals = service.add_principals(
+                group,
+                usernames if usernames is not None else set(),
+                service_account_client_ids if service_account_client_ids is not None else set(),
+            )
+
+            for principal in principals:
+                audit_log = AuditLog()
+                audit_log.log_group_assignment(request, AuditLog.GROUP_V2, group, principal, principal.type)
+
+        return Response(GroupV2ResponseSerializer(service.get(group)).data, status=status.HTTP_200_OK)
+
+    @_catch_principal_errors
+    def _perform_remove_principals_bulk(self, request, uuid=None):
+        """Remove principals from a group in bulk. All identifiers must resolve, or nothing is removed."""
+        service = GroupV2Service(tenant=request.tenant)
+        with atomic_block():
+            group = self.get_object()
+            serializer = GroupV2RemovePrincipalsInputSerializer(data=request.query_params)
+            serializer.is_valid(raise_exception=True)
+            usernames = set(serializer.validated_data.get("usernames") or [])
+            service_accounts = set(serializer.validated_data.get("service_accounts") or [])
+
+            principals = service.remove_principals(group, usernames, service_accounts)
+
+            for principal in principals:
+                audit_log = AuditLog()
+                audit_log.log_group_remove(request, AuditLog.GROUP_V2, group, principal, principal.type)
+
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @_catch_principal_errors
+    def _perform_remove_principal(self, request, uuid=None, principal_uuid=None):
+        """Remove a single principal from a group by principal UUID."""
+        service = GroupV2Service(tenant=request.tenant)
+        with atomic_block():
+            group = self.get_object()
+            principal = service.remove_principal(group, principal_uuid)
+
+            audit_log = AuditLog()
+            audit_log.log_group_remove(request, AuditLog.GROUP_V2, group, principal, principal.type)
 
         return Response(status=status.HTTP_204_NO_CONTENT)
 
