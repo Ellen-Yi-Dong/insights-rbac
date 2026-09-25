@@ -209,6 +209,48 @@ class AuditLogV2ViewTests(IdentityRequest):
         self.assertEqual(page1_again.status_code, status.HTTP_200_OK)
         self.assertEqual(self._usernames(page1_again), ["admin", "alice"])
 
+    def test_pagination_same_timestamp_no_duplicates(self):
+        """Entries sharing the exact same timestamp are never skipped or duplicated.
+
+        Cursor pagination must use a unique tiebreaker (pk) alongside created
+        so that concurrent writes with identical timestamps paginate correctly.
+        """
+        same_time = self.now - timedelta(hours=6)
+        extra = []
+        for i in range(5):
+            extra.append(
+                AuditLog.objects.create(
+                    principal_username=f"dup-{i}",
+                    resource_type=AuditLog.ROLE,
+                    resource_id=100 + i,
+                    description=f"Same-ts entry {i}",
+                    action=AuditLog.CREATE,
+                    tenant=self.tenant,
+                    created=same_time,
+                )
+            )
+
+        try:
+            all_descriptions = []
+            url = f"{V2_URL}?limit=3"
+            pages = 0
+
+            while url and pages < 10:
+                response = self.client.get(url, **self.headers)
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                all_descriptions.extend(e["description"] for e in response.data["data"])
+                url = response.data["links"]["next"]
+                pages += 1
+
+            # No duplicates (descriptions are unique across all fixture entries)
+            self.assertEqual(len(all_descriptions), len(set(all_descriptions)))
+            # All same-ts entries present
+            for i in range(5):
+                self.assertIn(f"Same-ts entry {i}", all_descriptions)
+        finally:
+            for e in extra:
+                e.delete()
+
     def test_pagination_limit_minus_one_returns_all(self):
         """limit=-1 disables pagination."""
         response = self.client.get(f"{V2_URL}?limit=-1", **self.headers)
@@ -256,6 +298,27 @@ class AuditLogV2ViewTests(IdentityRequest):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(response.data["data"]), 1)
         self.assertEqual(response.data["data"][0]["resource_type"], "role")
+
+    def test_filter_by_group_v2_resource_type(self):
+        """resource_type=group_v2 is accepted (matches model RESOURCE_CHOICES)."""
+        AuditLog.objects.create(
+            principal_username="carol",
+            resource_type=AuditLog.GROUP_V2,
+            resource_uuid=uuid.uuid4(),
+            description="Created V2 group test",
+            action=AuditLog.CREATE,
+            tenant=self.tenant,
+            created=self.now,
+        )
+
+        try:
+            response = self.client.get(f"{V2_URL}?resource_type=group_v2", **self.headers)
+
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            self.assertEqual(len(response.data["data"]), 1)
+            self.assertEqual(response.data["data"][0]["resource_type"], "group_v2")
+        finally:
+            AuditLog.objects.filter(principal_username="carol").delete()
 
     def test_filter_by_invalid_resource_type_returns_400(self):
         """An unknown resource_type value is rejected."""

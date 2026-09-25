@@ -1785,6 +1785,7 @@ model PrincipalListResponse {
 @doc("Type of resource an audit log entry refers to")
 enum AuditLogResourceType {
     group,
+    group_v2,
     role,
     role_v2,
     user,

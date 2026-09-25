@@ -2846,6 +2846,7 @@ components:
       type: string
       enum:
         - group
+        - group_v2
         - role
         - role_v2
         - user

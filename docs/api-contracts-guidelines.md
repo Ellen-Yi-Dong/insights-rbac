@@ -21,7 +21,7 @@ Never register v2 routes unconditionally. The feature flag check in `urls.py` is
 - `V2Router` extends `DefaultRouter` with two custom `Route` entries for batch operations:
   - `{prefix}:batchCreate/` maps POST to `batch_create` action.
   - `{prefix}:batchDelete/` maps POST to `bulk_destroy` action.
-- Registered viewsets: `WorkspaceViewSet`, `RoleBindingViewSet`, `RoleV2ViewSet`, `PrincipalV2ViewSet`.
+- Registered viewsets: `WorkspaceViewSet`, `RoleBindingViewSet`, `RoleV2ViewSet`, `PrincipalV2ViewSet`, `GroupV2ViewSet`.
 - `AuditLogV2ViewSet` is registered outside the router as a plain path (`auditlogs/`) because audit log entries have no UUID identity — only a list route is exposed (no detail route).
 
 When adding a v2 endpoint, register on `V2Router` in `v2_urls.py`. For batch operations, use the existing `:batchCreate` / `:batchDelete` route pattern (colon prefix, camelCase action name). For read-only list endpoints without UUID-addressable resources, register as a plain `path()` in `urlpatterns` instead of on the router.
