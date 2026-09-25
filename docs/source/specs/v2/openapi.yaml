@@ -399,7 +399,7 @@ paths:
         - name: username_only
           in: query
           required: false
-          description: When true, return only usernames without enrichment from external identity services. Applies to user principals only.
+          description: Accepted for API compatibility. This endpoint does not enrich user principals from external identity services, so this flag has no effect.
           schema:
             type: boolean
             default: false
@@ -407,7 +407,7 @@ paths:
         - name: admin_only
           in: query
           required: false
-          description: When true, return only org admin users. Applies to user principals only.
+          description: "When true, return only org admin users. Applies to user principals only. Not yet implemented: org-admin status requires a BOP/IT lookup not available to this endpoint's local-only lookups; the flag is currently accepted but has no filtering effect."
           schema:
             type: boolean
             default: false
@@ -563,14 +563,14 @@ paths:
         - name: usernames
           in: query
           required: false
-          description: Comma-separated usernames to remove from the group
+          description: Comma-separated usernames to remove from the group. At most 100 unique identifiers after deduplication.
           schema:
             type: string
           explode: false
         - name: service_accounts
           in: query
           required: false
-          description: Comma-separated service account client IDs to remove from the group
+          description: Comma-separated service account client IDs to remove from the group. At most 100 unique identifiers after deduplication.
           schema:
             type: string
           explode: false
@@ -2727,13 +2727,13 @@ components:
           items:
             type: string
           minItems: 1
-          description: Usernames to add.
+          description: Usernames to add. At most 100 unique identifiers are allowed after deduplication.
         service_accounts:
           type: array
           items:
             type: string
           minItems: 1
-          description: Service account client IDs to add. Must contain at least one item.
+          description: Service account client IDs to add. Must contain at least one item. At most 100 unique identifiers are allowed after deduplication.
           example:
             - abc-123-def
       description: Add principals by service account client ID. usernames may also be supplied.
@@ -2747,13 +2747,13 @@ components:
           items:
             type: string
           minItems: 1
-          description: Usernames to add. Must contain at least one item.
+          description: Usernames to add. Must contain at least one item. At most 100 unique identifiers are allowed after deduplication.
         service_accounts:
           type: array
           items:
             type: string
           minItems: 1
-          description: Service account client IDs to add.
+          description: Service account client IDs to add. At most 100 unique identifiers are allowed after deduplication.
           example:
             - abc-123-def
       description: Add principals by username. service_accounts may also be supplied.

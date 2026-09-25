@@ -19,6 +19,7 @@
 import uuid
 from importlib import reload
 from unittest.mock import patch
+from urllib.parse import urlencode
 
 from django.db.models import ProtectedError
 from django.test import override_settings
@@ -100,6 +101,12 @@ class GroupV2ViewTestBase(IdentityRequest):
 
     def _detail_url(self, group_uuid):
         return reverse("v2_management:groups-detail", kwargs={"uuid": str(group_uuid)})
+
+    def _principals_url(self, group_uuid):
+        return self._detail_url(group_uuid) + "principals/"
+
+    def _principal_detail_url(self, group_uuid, principal_uuid):
+        return self._principals_url(group_uuid) + f"{principal_uuid}/"
 
     def _list(self, **params):
         return self.client.get(self._list_url(), params, **self.headers)
@@ -1012,22 +1019,588 @@ class GroupV2ServiceQueryTest(GroupV2ViewTestBase):
                 self.assertEqual(list(queryset), [])
 
 
+class GroupV2ListPrincipalsViewTest(GroupV2ViewTestBase):
+    """Tests for listing a group's member principals."""
+
+    def _list_principals(self, group_uuid, **params):
+        return self.client.get(self._principals_url(group_uuid), params, **self.headers)
+
+    def _usernames(self, response):
+        return [p["username"] for p in response.json()["data"]]
+
+    def test_list_defaults_to_user_type(self):
+        """Without principal_type, only user principals are returned."""
+        response = self._list_principals(self.group_a.uuid)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertCountEqual(self._usernames(response), ["user_1", "user_2"])
+
+    def test_list_service_account_type(self):
+        """principal_type=service-account returns only service accounts."""
+        response = self._list_principals(self.group_a.uuid, principal_type="service-account")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self._usernames(response), ["service-account-abc"])
+
+    def test_list_all_type(self):
+        """principal_type=all returns both users and service accounts."""
+        response = self._list_principals(self.group_a.uuid, principal_type="all")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertCountEqual(self._usernames(response), ["user_1", "user_2", "service-account-abc"])
+
+    def test_list_filter_by_username(self):
+        """The username filter narrows by substring."""
+        response = self._list_principals(self.group_a.uuid, username="user_1")
+
+        self.assertEqual(self._usernames(response), ["user_1"])
+
+    def test_list_filter_by_principal_username(self):
+        """principal_username filters across the current principal_type selection."""
+        response = self._list_principals(self.group_a.uuid, principal_type="all", principal_username="service")
+
+        self.assertEqual(self._usernames(response), ["service-account-abc"])
+
+    def test_list_filter_by_service_account_name_excludes_matching_users(self):
+        """service_account_name is scoped to service accounts and never matches a user principal by username."""
+        user_service = Principal.objects.create(username="service-user", tenant=self.tenant)
+        self.group_a.principals.add(user_service)
+
+        response = self._list_principals(self.group_a.uuid, principal_type="all", service_account_name="service")
+
+        self.assertEqual(self._usernames(response), ["service-account-abc"])
+
+    def test_list_filter_by_service_account_description_excludes_matching_users(self):
+        """service_account_description is scoped to service accounts and never matches a user principal by username."""
+        user_service = Principal.objects.create(username="service-user", tenant=self.tenant)
+        self.group_a.principals.add(user_service)
+
+        response = self._list_principals(
+            self.group_a.uuid, principal_type="all", service_account_description="service"
+        )
+
+        self.assertEqual(self._usernames(response), ["service-account-abc"])
+
+    def test_list_filter_by_service_account_name_and_description_are_ored(self):
+        """service_account_name and service_account_description are independent OR-ed criteria, not ANDed.
+
+        Each filter degrades to matching on username; supplying both together must not require a single
+        username to contain both substrings simultaneously.
+        """
+        other_sa = Principal.objects.create(
+            username="service-account-other",
+            service_account_id="other",
+            type=Principal.Types.SERVICE_ACCOUNT,
+            tenant=self.tenant,
+        )
+        self.group_a.principals.add(other_sa)
+
+        response = self._list_principals(
+            self.group_a.uuid,
+            principal_type="all",
+            service_account_name="abc",
+            service_account_description="other",
+        )
+
+        self.assertCountEqual(self._usernames(response), ["service-account-abc", "service-account-other"])
+
+    def test_list_service_account_name_ignored_when_principal_type_defaults_to_user(self):
+        """service_account_name is a documented no-op when principal_type defaults to 'user', not a zeroing filter."""
+        response = self._list_principals(self.group_a.uuid, service_account_name="anything")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertCountEqual(self._usernames(response), ["user_1", "user_2"])
+
+    def test_list_filter_by_service_account_client_ids(self):
+        """service_account_client_ids matches membership by client ID."""
+        response = self._list_principals(self.group_a.uuid, service_account_client_ids="abc,nonexistent")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self._usernames(response), ["service-account-abc"])
+
+    def test_list_service_account_client_ids_incompatible_with_other_filters(self):
+        """service_account_client_ids cannot be combined with any other filter parameter."""
+        response = self._list_principals(self.group_a.uuid, service_account_client_ids="abc", username="user_1")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_list_excludes_non_members(self):
+        """A principal that is not a member of the group is not returned."""
+        response = self._list_principals(self.group_b.uuid)
+
+        self.assertEqual(self._usernames(response), ["user_1"])
+
+    def test_list_excludes_cross_account_principals(self):
+        """Cross-account principals are synthetic and never returned, even if a member of the group."""
+        cross_account = Principal.objects.create(username="cross-account-user", cross_account=True, tenant=self.tenant)
+        self.group_a.principals.add(cross_account)
+
+        response = self._list_principals(self.group_a.uuid)
+
+        self.assertCountEqual(self._usernames(response), ["user_1", "user_2"])
+
+    def test_list_uses_offset_pagination(self):
+        """The list response uses offset pagination meta."""
+        response = self._list_principals(self.group_a.uuid, principal_type="all", limit=1)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        body = response.json()
+        self.assertEqual(len(body["data"]), 1)
+        self.assertEqual(body["meta"]["count"], 3)
+
+    def test_list_other_tenant_group_not_found(self):
+        """Listing principals for another tenant's group returns 404."""
+        other_tenant = self.tenant.__class__.objects.create(tenant_name="other", org_id="other-org")
+        other_group = Group.objects.create(name="other", tenant=other_tenant)
+
+        response = self._list_principals(other_group.uuid)
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_list_group_count_reflects_all_tenant_groups(self):
+        """group_count for a principal counts membership across all tenant-local groups, not just the queried group.
+
+        Regression: starting from group.principals (related manager) could cause the Count annotation
+        to be limited to the queried group only.  Using Principal.objects.filter(pk__in=...) avoids this.
+        """
+        # user_1 is in group_a and group_b (2 groups); user_2 is in group_a only (1 group).
+        response = self._list_principals(self.group_a.uuid)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        by_username = {p["username"]: p for p in response.json()["data"]}
+        self.assertEqual(by_username["user_1"]["group_count"], 2)
+        self.assertEqual(by_username["user_2"]["group_count"], 1)
+
+    def test_list_denied_without_read_permission(self):
+        """Listing group principals requires rbac_groups_read."""
+        self.mock_check_access.return_value = False
+
+        response = self._list_principals(self.group_a.uuid)
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(self.mock_check_access.call_args.kwargs["relation"], "rbac_groups_read")
+
+
+class GroupV2AddPrincipalsViewTest(GroupV2ViewTestBase):
+    """Tests for adding principals to a group."""
+
+    def setUp(self):
+        """Add a tenant user not yet in any group used by these tests."""
+        super().setUp()
+        self.user_3 = Principal.objects.create(username="user_3", tenant=self.tenant)
+        self.service_account_2 = Principal.objects.create(
+            username="service-account-xyz",
+            service_account_id="xyz",
+            type=Principal.Types.SERVICE_ACCOUNT,
+            tenant=self.tenant,
+        )
+
+        # Mock BOP proxy: return data for usernames that exist as user-type Principals in this
+        # tenant's local DB, simulating BOP validating org membership.
+        def _mock_bop(usernames, org_id=None, limit=None, offset=None, options=None):
+            found = Principal.objects.filter(
+                username__in=[u.lower() if isinstance(u, str) else u for u in usernames],
+                tenant=self.tenant,
+                type=Principal.Types.USER,
+            )
+            return {
+                "status_code": 200,
+                "data": [
+                    {
+                        "username": p.username,
+                        "user_id": str(p.user_id) if p.user_id else f"uid-{p.username}",
+                        "org_id": org_id or self.tenant.org_id,
+                        "is_active": True,
+                        "is_org_admin": False,
+                    }
+                    for p in found
+                ],
+            }
+
+        self.mock_proxy = self.enterContext(
+            patch(
+                "management.principal.proxy.PrincipalProxy.request_filtered_principals",
+                side_effect=_mock_bop,
+            )
+        )
+        self.mock_backfill = self.enterContext(patch("management.group.v2_view.backfill_remote_principals"))
+
+    def _add(self, group_uuid, body):
+        return self.client.post(self._principals_url(group_uuid), body, format="json", **self.headers)
+
+    def test_add_by_username(self):
+        """A user is added by username and the full group is returned."""
+        response = self._add(self.group_b.uuid, {"usernames": ["user_3"]})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        data = response.json()
+        self.assertEqual(data["uuid"], str(self.group_b.uuid))
+        self.assertEqual(data["principal_count"], 2)
+        self.assertTrue(self.group_b.principals.filter(pk=self.user_3.pk).exists())
+
+        self.mock_dual_write.assert_called_once()
+        self.assertEqual(self.mock_dual_write.call_args.args[1], ReplicationEventType.ADD_PRINCIPALS_TO_GROUP)
+        added = self.mock_dual_write.return_value.replicate_new_principals.call_args.args[0]
+        self.assertEqual(added, [self.user_3])
+
+        log = AuditLog.objects.get(resource_type=AuditLog.GROUP_V2, action=AuditLog.ADD)
+        self.assertEqual(log.secondary_resource_uuid, self.user_3.uuid)
+
+    def test_add_username_case_insensitive(self):
+        """Usernames are matched case-insensitively, since Principal stores them lower case."""
+        response = self._add(self.group_b.uuid, {"usernames": ["USER_3"]})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(self.group_b.principals.filter(pk=self.user_3.pk).exists())
+
+    def test_add_by_service_account(self):
+        """A service account is added by client ID."""
+        response = self._add(self.group_b.uuid, {"service_accounts": ["xyz"]})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(self.group_b.principals.filter(pk=self.service_account_2.pk).exists())
+
+    def test_add_duplicate_usernames_deduplicated(self):
+        """Duplicate identifiers in the same request are resolved to a distinct set."""
+        response = self._add(self.group_b.uuid, {"usernames": ["user_3", "user_3"]})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.json()["principal_count"], 2)
+        added = self.mock_dual_write.return_value.replicate_new_principals.call_args.args[0]
+        self.assertEqual(len(added), 1)
+
+    def test_add_many_duplicate_usernames_not_rejected(self):
+        """The batch-size limit applies to the deduplicated identifier count, not the raw request payload.
+
+        Matches the bulk-remove endpoint, which parses its comma-separated identifiers into a set before
+        enforcing MAX_BULK_PRINCIPALS.
+        """
+        response = self._add(self.group_b.uuid, {"usernames": ["user_3"] * 101})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_add_already_member_is_a_no_op(self):
+        """Re-adding an existing member resolves successfully but replicates and audit-logs nothing."""
+        response = self._add(self.group_a.uuid, {"usernames": ["user_1"]})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.json()["principal_count"], 2)
+        self.mock_dual_write.assert_not_called()
+        self.assertFalse(AuditLog.objects.filter(resource_type=AuditLog.GROUP_V2, action=AuditLog.ADD).exists())
+
+    def test_add_mixed_new_and_existing_member_replicates_only_new(self):
+        """When some identifiers are already members, only the newly added ones are replicated/audit-logged."""
+        response = self._add(self.group_a.uuid, {"usernames": ["user_1", "user_3"]})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        added = self.mock_dual_write.return_value.replicate_new_principals.call_args.args[0]
+        self.assertEqual(added, [self.user_3])
+        self.assertEqual(AuditLog.objects.filter(resource_type=AuditLog.GROUP_V2, action=AuditLog.ADD).count(), 1)
+
+    def test_add_empty_body_rejected(self):
+        """An empty body is rejected at the serializer layer."""
+        for body in ({}, {"usernames": []}, {"usernames": [], "service_accounts": []}):
+            with self.subTest(body=body):
+                response = self._add(self.group_b.uuid, body)
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_add_too_many_usernames_rejected(self):
+        """A request exceeding the maximum batch size is rejected at the serializer layer."""
+        response = self._add(self.group_b.uuid, {"usernames": [f"user_{i}" for i in range(101)]})
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_add_unknown_username_not_found(self):
+        """An unknown username returns 404 and adds nothing."""
+        response = self._add(self.group_b.uuid, {"usernames": ["user_3", "no-such-user"]})
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertFalse(self.group_b.principals.filter(pk=self.user_3.pk).exists())
+        self.mock_dual_write.return_value.replicate_new_principals.assert_not_called()
+
+    def test_add_system_group_rejected(self):
+        """System groups cannot have principals added."""
+        group = Group.objects.create(name="sys", system=True, tenant=self.tenant)
+
+        response = self._add(group.uuid, {"usernames": ["user_3"]})
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.json()["detail"], "Groups with system=true may not be modified.")
+        self.mock_dual_write.return_value.replicate_new_principals.assert_not_called()
+
+    def test_add_platform_and_admin_default_groups_allowed(self):
+        """platform_default and admin_default groups allow adding members."""
+        for flag in ("platform_default", "admin_default"):
+            with self.subTest(flag=flag):
+                group = Group.objects.create(name=f"{flag}-group", tenant=self.tenant, **{flag: True})
+
+                response = self._add(group.uuid, {"usernames": ["user_3"]})
+
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                group.principals.remove(self.user_3)
+
+    def test_add_requires_write_permission(self):
+        """Adding principals requires rbac_groups_write."""
+        self.mock_check_access.return_value = False
+
+        response = self._add(self.group_b.uuid, {"usernames": ["user_3"]})
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(self.mock_check_access.call_args.kwargs["relation"], "rbac_groups_write")
+        self.assertFalse(self.group_b.principals.filter(pk=self.user_3.pk).exists())
+
+    def test_add_group_not_found(self):
+        """Adding principals to an unknown group returns 404."""
+        response = self._add(uuid.uuid4(), {"usernames": ["user_3"]})
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_add_cross_account_principal_not_found(self):
+        """A cross-account principal is not resolvable through this local-lookup endpoint."""
+        Principal.objects.create(username="cross-account-user", cross_account=True, tenant=self.tenant)
+
+        response = self._add(self.group_b.uuid, {"usernames": ["cross-account-user"]})
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_add_replication_failure_rolls_back_membership(self):
+        """A replication failure inside atomic_block() rolls back the M2M membership change."""
+        self.mock_dual_write.return_value.replicate_new_principals.side_effect = Exception("replication failed")
+        self.client.raise_request_exception = False
+
+        response = self._add(self.group_b.uuid, {"usernames": ["user_3"]})
+
+        self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        self.assertFalse(self.group_b.principals.filter(pk=self.user_3.pk).exists())
+
+    def test_add_validates_usernames_via_bop(self):
+        """User principals are validated against BOP before being added to the group."""
+        response = self._add(self.group_b.uuid, {"usernames": ["user_3"]})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.mock_proxy.assert_called_once()
+        call_args = self.mock_proxy.call_args
+        self.assertEqual(sorted(call_args.args[0]), ["user_3"])
+        self.mock_backfill.assert_called_once()
+
+    def test_add_bop_proxy_error_returns_error(self):
+        """A BOP proxy error is surfaced as an error response without modifying group membership."""
+        self.mock_proxy.side_effect = None
+        self.mock_proxy.return_value = {
+            "status_code": 502,
+            "errors": [{"detail": "BOP unavailable", "status": "502", "source": "principals"}],
+        }
+
+        response = self._add(self.group_b.uuid, {"usernames": ["user_3"]})
+
+        self.assertEqual(response.status_code, status.HTTP_502_BAD_GATEWAY)
+        self.assertFalse(self.group_b.principals.filter(pk=self.user_3.pk).exists())
+
+    def test_add_bop_skipped_for_service_account_only_request(self):
+        """BOP validation is only for user principals; service-account-only requests skip it."""
+        response = self._add(self.group_b.uuid, {"service_accounts": ["xyz"]})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.mock_proxy.assert_not_called()
+        self.mock_backfill.assert_not_called()
+
+
+class GroupV2RemovePrincipalsBulkViewTest(GroupV2ViewTestBase):
+    """Tests for bulk-removing principals from a group."""
+
+    def _remove(self, group_uuid, **params):
+        url = self._principals_url(group_uuid)
+        if params:
+            url += "?" + urlencode(params)
+        return self.client.delete(url, **self.headers)
+
+    def test_remove_by_username(self):
+        """A user is removed by username."""
+        response = self._remove(self.group_a.uuid, usernames="user_1")
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(self.group_a.principals.filter(pk=self.user_1.pk).exists())
+
+        self.mock_dual_write.assert_called_once()
+        self.assertEqual(self.mock_dual_write.call_args.args[1], ReplicationEventType.REMOVE_PRINCIPALS_FROM_GROUP)
+        removed = self.mock_dual_write.return_value.replicate_removed_principals.call_args.args[0]
+        self.assertEqual(removed, [self.user_1])
+
+        log = AuditLog.objects.get(resource_type=AuditLog.GROUP_V2, action=AuditLog.REMOVE)
+        self.assertEqual(log.secondary_resource_uuid, self.user_1.uuid)
+
+    def test_remove_by_service_account(self):
+        """A service account is removed by client ID."""
+        response = self._remove(self.group_a.uuid, service_accounts="abc")
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(self.group_a.principals.filter(pk=self.service_account.pk).exists())
+
+    def test_remove_missing_query_params_rejected(self):
+        """Neither usernames nor service_accounts is a 400."""
+        response = self._remove(self.group_a.uuid)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_remove_too_many_usernames_rejected(self):
+        """A request exceeding the maximum batch size is rejected at the serializer layer."""
+        usernames = ",".join(f"user_{i}" for i in range(101))
+
+        response = self._remove(self.group_a.uuid, usernames=usernames)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_remove_unmatched_identifier_leaves_membership_unchanged(self):
+        """One unmatched identifier aborts the whole request; nothing is removed."""
+        response = self._remove(self.group_a.uuid, usernames="user_1,no-such-user")
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertCountEqual(self.group_a.principals.all(), [self.user_1, self.user_2, self.service_account])
+        self.mock_dual_write.return_value.replicate_removed_principals.assert_not_called()
+
+    def test_remove_non_member_principal_not_found(self):
+        """A principal that exists tenant-wide but is not a member of this group returns 404."""
+        response = self._remove(self.group_b.uuid, usernames="user_2")
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_remove_duplicate_usernames_deduplicated(self):
+        """Duplicate identifiers in the query params are resolved to a distinct set and removed exactly once."""
+        response = self._remove(self.group_a.uuid, usernames="user_1,user_1")
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(self.group_a.principals.filter(pk=self.user_1.pk).exists())
+        removed = self.mock_dual_write.return_value.replicate_removed_principals.call_args.args[0]
+        self.assertEqual(len(removed), 1)
+
+    def test_remove_replication_failure_rolls_back_membership(self):
+        """A replication failure inside atomic_block() rolls back the M2M membership change."""
+        self.mock_dual_write.return_value.replicate_removed_principals.side_effect = Exception("replication failed")
+        self.client.raise_request_exception = False
+
+        response = self._remove(self.group_a.uuid, usernames="user_1")
+
+        self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        self.assertTrue(self.group_a.principals.filter(pk=self.user_1.pk).exists())
+
+    def test_remove_system_group_rejected(self):
+        """System groups cannot have principals removed."""
+        group = Group.objects.create(name="sys", system=True, tenant=self.tenant)
+        group.principals.add(self.user_1)
+
+        response = self._remove(group.uuid, usernames="user_1")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertTrue(group.principals.filter(pk=self.user_1.pk).exists())
+
+    def test_remove_requires_write_permission(self):
+        """Removing principals requires rbac_groups_write."""
+        self.mock_check_access.return_value = False
+
+        response = self._remove(self.group_a.uuid, usernames="user_1")
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(self.mock_check_access.call_args.kwargs["relation"], "rbac_groups_write")
+        self.assertTrue(self.group_a.principals.filter(pk=self.user_1.pk).exists())
+
+
+class GroupV2RemovePrincipalViewTest(GroupV2ViewTestBase):
+    """Tests for removing a single principal from a group."""
+
+    def _remove(self, group_uuid, principal_uuid):
+        return self.client.delete(self._principal_detail_url(group_uuid, principal_uuid), **self.headers)
+
+    def test_remove_principal(self):
+        """A member principal is removed by UUID, without needing bulk query parameters.
+
+        A 204 here (rather than the bulk route's 400 for missing query params) confirms the
+        single-remove route is not swallowed by the bulk DELETE route.
+        """
+        response = self._remove(self.group_a.uuid, self.user_1.uuid)
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(self.group_a.principals.filter(pk=self.user_1.pk).exists())
+
+        self.mock_dual_write.assert_called_once()
+        self.assertEqual(self.mock_dual_write.call_args.args[1], ReplicationEventType.REMOVE_PRINCIPALS_FROM_GROUP)
+        removed = self.mock_dual_write.return_value.replicate_removed_principals.call_args.args[0]
+        self.assertEqual(removed, [self.user_1])
+
+        log = AuditLog.objects.get(resource_type=AuditLog.GROUP_V2, action=AuditLog.REMOVE)
+        self.assertEqual(log.secondary_resource_uuid, self.user_1.uuid)
+
+    def test_remove_principal_not_a_member_not_found(self):
+        """A principal that exists tenant-wide but is not a member of this group returns 404, not 500."""
+        response = self._remove(self.group_b.uuid, self.service_account.uuid)
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_remove_principal_unknown_uuid_not_found(self):
+        """An unknown principal UUID returns 404."""
+        response = self._remove(self.group_a.uuid, uuid.uuid4())
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_remove_principal_malformed_uuid_not_found(self):
+        """A malformed UUID that still matches the route regex returns 404, not 500."""
+        response = self._remove(self.group_a.uuid, "abc-def")
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_remove_principal_system_group_rejected(self):
+        """System groups cannot have principals removed."""
+        group = Group.objects.create(name="sys", system=True, tenant=self.tenant)
+        group.principals.add(self.user_1)
+
+        response = self._remove(group.uuid, self.user_1.uuid)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertTrue(group.principals.filter(pk=self.user_1.pk).exists())
+
+    def test_remove_principal_requires_write_permission(self):
+        """Removing a principal requires rbac_groups_write."""
+        self.mock_check_access.return_value = False
+
+        response = self._remove(self.group_a.uuid, self.user_1.uuid)
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(self.mock_check_access.call_args.kwargs["relation"], "rbac_groups_write")
+        self.assertTrue(self.group_a.principals.filter(pk=self.user_1.pk).exists())
+
+    def test_remove_principal_replication_failure_rolls_back_membership(self):
+        """A replication failure inside atomic_block() rolls back the M2M membership change."""
+        self.mock_dual_write.return_value.replicate_removed_principals.side_effect = Exception("replication failed")
+        self.client.raise_request_exception = False
+
+        response = self._remove(self.group_a.uuid, self.user_1.uuid)
+
+        self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        self.assertTrue(self.group_a.principals.filter(pk=self.user_1.pk).exists())
+
+
 class GroupV2AccessPermissionTest(IdentityRequest):
     """Tests for GroupV2KesselAccessPermission relation selection."""
+
+    def _request(self, method):
+        return type("Request", (), {"method": method})()
 
     def test_relation_for_actions(self):
         """Write actions require rbac_groups_write, everything else rbac_groups_read."""
         permission = GroupV2KesselAccessPermission()
-        for action, relation in (
-            ("list", "rbac_groups_read"),
-            ("retrieve", "rbac_groups_read"),
-            ("create", "rbac_groups_write"),
-            ("update", "rbac_groups_write"),
-            ("destroy", "rbac_groups_write"),
+        for action, method, relation in (
+            ("list", "GET", "rbac_groups_read"),
+            ("retrieve", "GET", "rbac_groups_read"),
+            ("create", "POST", "rbac_groups_write"),
+            ("update", "PUT", "rbac_groups_write"),
+            ("destroy", "DELETE", "rbac_groups_write"),
+            ("principals", "GET", "rbac_groups_read"),
+            ("principals", "POST", "rbac_groups_write"),
+            ("principals", "DELETE", "rbac_groups_write"),
+            ("remove_principal", "DELETE", "rbac_groups_write"),
         ):
-            with self.subTest(action=action):
+            with self.subTest(action=action, method=method):
                 view = type("View", (), {"action": action})()
-                self.assertEqual(permission._get_relation(view), relation)
+                self.assertEqual(permission._get_relation(view, self._request(method)), relation)
 
 
 class GroupV2RouteGatingTest(IdentityRequest):
@@ -1040,6 +1613,9 @@ class GroupV2RouteGatingTest(IdentityRequest):
         clear_url_caches()
         try:
             response = self.client.get("/api/rbac/v2/groups/", **self.headers)
+            self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+            response = self.client.get(f"/api/rbac/v2/groups/{uuid.uuid4()}/principals/", **self.headers)
             self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         finally:
             clear_url_caches()

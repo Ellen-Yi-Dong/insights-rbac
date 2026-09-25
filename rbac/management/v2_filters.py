@@ -17,14 +17,29 @@
 """Shared V2 query filter utilities."""
 
 import re
+from typing import Optional
 
-from django.db.models import QuerySet
+from django.db.models import Q, QuerySet
 
 
 def _glob_to_regex(pattern: str) -> str:
     """Convert a glob pattern with '*' wildcards to a regex."""
     parts = pattern.split("*", maxsplit=10)
     return "^" + ".*".join(re.escape(p) for p in parts) + "$"
+
+
+def v2_name_query(name: str, field: str = "name") -> Optional[Q]:
+    """Build a Q object for name filtering with '*' glob support.
+
+    Without wildcards, performs case-insensitive substring match.
+    With '*' wildcards, converts to regex for pattern matching.
+    A bare '*' matches everything, represented as None (no filter needed).
+    """
+    if name == "*":
+        return None
+    if "*" in name:
+        return Q(**{f"{field}__iregex": _glob_to_regex(name)})
+    return Q(**{f"{field}__icontains": name})
 
 
 def v2_name_filter(queryset: QuerySet, name: str, field: str = "name", extra_filters: dict | None = None) -> QuerySet:
@@ -38,8 +53,7 @@ def v2_name_filter(queryset: QuerySet, name: str, field: str = "name", extra_fil
     same joined row as the name lookup (rather than an independently-joined row).
     """
     extra_filters = extra_filters or {}
-    if name == "*":
+    query = v2_name_query(name, field=field)
+    if query is None:
         return queryset.filter(**extra_filters) if extra_filters else queryset
-    if "*" in name:
-        return queryset.filter(**{f"{field}__iregex": _glob_to_regex(name)}, **extra_filters)
-    return queryset.filter(**{f"{field}__icontains": name}, **extra_filters)
+    return queryset.filter(query, **extra_filters)
