@@ -20,7 +20,7 @@
 from typing import Optional
 
 from management.audit_log.model import AuditLog
-from management.utils import FieldSelection, FieldSelectionValidationError, normalize_blank_or_none
+from management.utils import FieldSelection, normalize_blank_or_none, resolve_field_selection
 from rest_framework import serializers
 
 # Ordering fields accepted by the ``order_by`` query parameter.
@@ -82,20 +82,7 @@ def validate_fields_parameter(value: str, default_fields: Optional[set] = None) 
             names a field that the endpoint does not return.
     """
     defaults = DEFAULT_AUDIT_LOG_FIELDS if default_fields is None else default_fields
-
-    if not value:
-        return defaults
-
-    try:
-        field_selection = AuditLogFieldSelection.parse(value)
-    except FieldSelectionValidationError as e:
-        raise serializers.ValidationError({"fields": e.message})
-
-    if not field_selection:
-        return defaults
-
-    resolved = field_selection.root_fields & DEFAULT_AUDIT_LOG_FIELDS
-    return resolved or defaults
+    return resolve_field_selection(value, AuditLogFieldSelection, defaults, error_key="fields")
 
 
 class AuditLogV2ListInputSerializer(serializers.Serializer):
@@ -139,30 +126,21 @@ class AuditLogV2ListInputSerializer(serializers.Serializer):
         help_text="Sort by created, prefix with '-' for descending. Valid: created, -created.",
     )
 
-    def validate_resource_type(self, value):
-        """Return None for empty values."""
-        return value or None
-
-    def validate_action(self, value):
-        """Return None for empty values."""
-        return value or None
-
     validate_principal_username = staticmethod(normalize_blank_or_none)
-    validate_order_by = staticmethod(normalize_blank_or_none)
+    validate_resource_type = staticmethod(normalize_blank_or_none)
+    validate_action = staticmethod(normalize_blank_or_none)
+
+    def validate_order_by(self, value):
+        """Normalize blank values and reject unsupported ordering fields."""
+        order_by = normalize_blank_or_none(value)
+        if order_by and order_by not in VALID_ORDER_BY_FIELDS:
+            raise serializers.ValidationError(
+                f"Invalid order_by value '{order_by}'. Valid values: {', '.join(sorted(VALID_ORDER_BY_FIELDS))}"
+            )
+        return order_by
 
     def validate(self, data):
         """Cross-field validation."""
-        order_by = data.get("order_by")
-        if order_by and order_by not in VALID_ORDER_BY_FIELDS:
-            raise serializers.ValidationError(
-                {
-                    "order_by": (
-                        f"Invalid order_by value '{order_by}'. "
-                        f"Valid values: {', '.join(sorted(VALID_ORDER_BY_FIELDS))}"
-                    )
-                }
-            )
-
         created_after = data.get("created_after")
         created_before = data.get("created_before")
         if created_after and created_before and created_after > created_before:
