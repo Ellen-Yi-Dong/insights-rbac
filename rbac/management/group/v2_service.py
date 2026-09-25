@@ -225,7 +225,7 @@ class GroupV2Service:
     def list_principals(self, group: Group, params: dict) -> QuerySet:
         """List a group's member principals, annotated with group_count, filtered by the given params."""
         queryset = (
-            group.principals.filter(tenant=self.tenant)
+            Principal.objects.filter(tenant=self.tenant, pk__in=group.principals.values("pk"))
             .exclude(cross_account=True)
             .annotate(group_count=Count("group", filter=Q(group__tenant=F("tenant")), distinct=True))
         )

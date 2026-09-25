@@ -1157,6 +1157,20 @@ class GroupV2ListPrincipalsViewTest(GroupV2ViewTestBase):
 
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
+    def test_list_group_count_reflects_all_tenant_groups(self):
+        """group_count for a principal counts membership across all tenant-local groups, not just the queried group.
+
+        Regression: starting from group.principals (related manager) could cause the Count annotation
+        to be limited to the queried group only.  Using Principal.objects.filter(pk__in=...) avoids this.
+        """
+        # user_1 is in group_a and group_b (2 groups); user_2 is in group_a only (1 group).
+        response = self._list_principals(self.group_a.uuid)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        by_username = {p["username"]: p for p in response.json()["data"]}
+        self.assertEqual(by_username["user_1"]["group_count"], 2)
+        self.assertEqual(by_username["user_2"]["group_count"], 1)
+
     def test_list_denied_without_read_permission(self):
         """Listing group principals requires rbac_groups_read."""
         self.mock_check_access.return_value = False

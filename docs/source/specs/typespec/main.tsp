@@ -2157,27 +2157,23 @@ namespace Groups {
 
     @doc("Add principals by username. service_accounts may also be supplied.")
     model AddUsernamesInput {
-        @doc("Usernames to add. Must contain at least one item, and at most 100.")
+        @doc("Usernames to add. Must contain at least one item. At most 100 unique identifiers are allowed after deduplication.")
         @minItems(1)
-        @maxItems(100)
         usernames: string[];
-        @doc("Service account client IDs to add. At most 100.")
+        @doc("Service account client IDs to add. At most 100 unique identifiers are allowed after deduplication.")
         @example(#["abc-123-def"])
         @minItems(1)
-        @maxItems(100)
         service_accounts?: string[];
     }
 
     @doc("Add principals by service account client ID. usernames may also be supplied.")
     model AddServiceAccountsInput {
-        @doc("Usernames to add. At most 100.")
+        @doc("Usernames to add. At most 100 unique identifiers are allowed after deduplication.")
         @minItems(1)
-        @maxItems(100)
         usernames?: string[];
-        @doc("Service account client IDs to add. Must contain at least one item, and at most 100.")
+        @doc("Service account client IDs to add. Must contain at least one item. At most 100 unique identifiers are allowed after deduplication.")
         @example(#["abc-123-def"])
         @minItems(1)
-        @maxItems(100)
         service_accounts: string[];
     }
 

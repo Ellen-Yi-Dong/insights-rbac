@@ -4280,8 +4280,7 @@
               "type": "string"
             },
             "minItems": 1,
-            "maxItems": 100,
-            "description": "Usernames to add. At most 100."
+            "description": "Usernames to add. At most 100 unique identifiers are allowed after deduplication."
           },
           "service_accounts": {
             "type": "array",
@@ -4289,8 +4288,7 @@
               "type": "string"
             },
             "minItems": 1,
-            "maxItems": 100,
-            "description": "Service account client IDs to add. Must contain at least one item, and at most 100.",
+            "description": "Service account client IDs to add. Must contain at least one item. At most 100 unique identifiers are allowed after deduplication.",
             "example": [
               "abc-123-def"
             ]
@@ -4310,8 +4308,7 @@
               "type": "string"
             },
             "minItems": 1,
-            "maxItems": 100,
-            "description": "Usernames to add. Must contain at least one item, and at most 100."
+            "description": "Usernames to add. Must contain at least one item. At most 100 unique identifiers are allowed after deduplication."
           },
           "service_accounts": {
             "type": "array",
@@ -4319,8 +4316,7 @@
               "type": "string"
             },
             "minItems": 1,
-            "maxItems": 100,
-            "description": "Service account client IDs to add. At most 100.",
+            "description": "Service account client IDs to add. At most 100 unique identifiers are allowed after deduplication.",
             "example": [
               "abc-123-def"
             ]

@@ -2727,15 +2727,13 @@ components:
           items:
             type: string
           minItems: 1
-          maxItems: 100
-          description: Usernames to add. At most 100.
+          description: Usernames to add. At most 100 unique identifiers are allowed after deduplication.
         service_accounts:
           type: array
           items:
             type: string
           minItems: 1
-          maxItems: 100
-          description: Service account client IDs to add. Must contain at least one item, and at most 100.
+          description: Service account client IDs to add. Must contain at least one item. At most 100 unique identifiers are allowed after deduplication.
           example:
             - abc-123-def
       description: Add principals by service account client ID. usernames may also be supplied.
@@ -2749,15 +2747,13 @@ components:
           items:
             type: string
           minItems: 1
-          maxItems: 100
-          description: Usernames to add. Must contain at least one item, and at most 100.
+          description: Usernames to add. Must contain at least one item. At most 100 unique identifiers are allowed after deduplication.
         service_accounts:
           type: array
           items:
             type: string
           minItems: 1
-          maxItems: 100
-          description: Service account client IDs to add. At most 100.
+          description: Service account client IDs to add. At most 100 unique identifiers are allowed after deduplication.
           example:
             - abc-123-def
       description: Add principals by username. service_accounts may also be supplied.
