@@ -641,7 +641,7 @@
             "name": "username_only",
             "in": "query",
             "required": false,
-            "description": "When true, return only usernames without enrichment from external identity services. Applies to user principals only. Accepted for API compatibility; this endpoint never enriches from external identity services, so the flag is always effectively satisfied.",
+            "description": "Accepted for API compatibility. This endpoint does not enrich user principals from external identity services, so this flag has no effect.",
             "schema": {
               "type": "boolean",
               "default": false
@@ -901,7 +901,7 @@
             "name": "usernames",
             "in": "query",
             "required": false,
-            "description": "Comma-separated usernames to remove from the group. At most 100.",
+            "description": "Comma-separated usernames to remove from the group. At most 100 unique identifiers after deduplication.",
             "schema": {
               "type": "string"
             },
@@ -911,7 +911,7 @@
             "name": "service_accounts",
             "in": "query",
             "required": false,
-            "description": "Comma-separated service account client IDs to remove from the group. At most 100.",
+            "description": "Comma-separated service account client IDs to remove from the group. At most 100 unique identifiers after deduplication.",
             "schema": {
               "type": "string"
             },

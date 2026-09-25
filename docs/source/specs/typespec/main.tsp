@@ -2140,7 +2140,7 @@ namespace Groups {
         @query username?: string;
         @doc("Filter by principal username (case-insensitive substring match). Applies to both user and service-account principals.")
         @query principal_username?: string;
-        @doc("When true, return only usernames without enrichment from external identity services. Applies to user principals only. Accepted for API compatibility; this endpoint never enriches from external identity services, so the flag is always effectively satisfied.")
+        @doc("Accepted for API compatibility. This endpoint does not enrich user principals from external identity services, so this flag has no effect.")
         @query username_only?: boolean = false;
         @doc("When true, return only org admin users. Applies to user principals only. Not yet implemented: org-admin status requires a BOP/IT lookup not available to this endpoint's local-only lookups; the flag is currently accepted but has no filtering effect.")
         @query admin_only?: boolean = false;
@@ -2204,9 +2204,9 @@ namespace Groups {
     @summary("Remove principals from a group in bulk")
     @delete op removePrincipals(
         @path uuid: UUID;
-        @doc("Comma-separated usernames to remove from the group. At most 100.")
+        @doc("Comma-separated usernames to remove from the group. At most 100 unique identifiers after deduplication.")
         @query usernames?: string;
-        @doc("Comma-separated service account client IDs to remove from the group. At most 100.")
+        @doc("Comma-separated service account client IDs to remove from the group. At most 100 unique identifiers after deduplication.")
         @query service_accounts?: string;
     ): NoContentResponse | Problems.CommonProblems | Problems.Problem404;
 }
