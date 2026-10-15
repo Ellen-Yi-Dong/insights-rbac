@@ -76,21 +76,32 @@ class ITServiceTests(IdentityRequest):
                 "no new instances of the IT service class should have been created since it is supposed to be a singleton",
             )
 
-    def _create_mock_it_service_accounts(self, number: int) -> list[dict[str, str]]:
-        """Create mock service accounts as returned by IT."""
+    def _create_mock_it_service_accounts(self, number: int) -> list[dict[str, typing.Any]]:
+        """Create mock service accounts as returned by IT.
+
+        Every other account is a service access token, so that the callers which fetch accounts from IT exercise
+        both shapes on every fetch path without needing a separate test each. Alternating by index rather than
+        randomising keeps the mix predictable for callers which only request a slice of the accounts.
+        """
         service_accounts: list[dict] = []
         for i in range(number):
             client_id = str(uuid.uuid4())
 
-            service_accounts.append(
-                {
-                    "clientId": client_id,
-                    "name": f"name-{client_id}",
-                    "description": f"description-{client_id}",
-                    "createdBy": f"createdBy-{client_id}",
-                    "createdAt": f"createdAt-{client_id}",
-                }
-            )
+            service_account = {
+                "clientId": client_id,
+                "name": f"name-{client_id}",
+                "description": f"description-{client_id}",
+                "createdBy": f"createdBy-{client_id}",
+                "createdAt": f"createdAt-{client_id}",
+            }
+
+            # Note IT's "type" key holds the mode, and is unrelated to the "type" RBAC returns, which stays
+            # "service-account" for both shapes. IT leaves these keys out for regular service accounts.
+            if i % 2 == 0:
+                service_account[IT_KEY_SERVICE_ACCOUNT_MODE] = IT_VALUE_MODE_SERVICE_ACCESS_TOKEN
+                service_account[IT_KEY_SERVICE_ACCOUNT_EXPIRATION] = 1713876532 + i
+
+            service_accounts.append(service_account)
 
         return service_accounts
 
@@ -221,7 +232,7 @@ class ITServiceTests(IdentityRequest):
         )
 
     def _assert_IT_to_RBAC_model_transformations(
-        self, it_service_accounts: list[dict[str, str]], rbac_service_accounts: list[dict[str, str]]
+        self, it_service_accounts: list[dict[str, typing.Any]], rbac_service_accounts: list[dict[str, typing.Any]]
     ) -> None:
         """Assert that the service accounts coming from IT were correctly transformed into our model"""
         # Rearrange RBAC's service accounts by client ID for an easier search later on.
@@ -310,6 +321,35 @@ class ITServiceTests(IdentityRequest):
                 it_sa_created_at,
                 "the time created and created at fields for the RBAC and IT models do not match",
             )
+
+            # Assert that the service access token attributes survived the round trip. The mapping rules
+            # themselves are covered by the transformation tests; what this guards is that the fetching,
+            # pagination and client ID filtering in between do not drop the fields on their way back out.
+            it_sa_mode = it_sa.get(IT_KEY_SERVICE_ACCOUNT_MODE)
+            if it_sa_mode:
+                self.assertEqual(
+                    it_sa_mode,
+                    rbac_sa.get("mode"),
+                    "the mode for the RBAC and IT models do not match",
+                )
+
+                self.assertEqual(
+                    it_sa.get(IT_KEY_SERVICE_ACCOUNT_EXPIRATION),
+                    rbac_sa.get("time_expires"),
+                    "the time expires and expiration fields for the RBAC and IT models do not match",
+                )
+            else:
+                self.assertNotIn(
+                    "mode",
+                    rbac_sa,
+                    "a service account which IT did not flag should come back without the mode key",
+                )
+
+                self.assertNotIn(
+                    "time_expires",
+                    rbac_sa,
+                    "a service account which IT did not flag should come back without the time expires key",
+                )
 
     def _assert_service_account_call(
         self, call, client_ids_assert: typing.Callable[[list[str]], None], *args, **kwargs

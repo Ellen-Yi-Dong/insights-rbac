@@ -42,9 +42,7 @@ IT_PATH_GET_SERVICE_ACCOUNTS = "/service_accounts/v1"
 
 # Keys IT uses for the "service access token" attributes on a service account. IT only sets these for service
 # accounts created in service access token mode, so they are absent for every regular service account.
-# TODO(CIAM-12318): confirm both key names and the set of values IT sends for the mode before this ships. RBAC
-# re-exposes them as "mode" and "time_expires" so IT's "type" does not collide with our own "type" field, which
-# distinguishes service accounts from users.
+
 IT_KEY_SERVICE_ACCOUNT_MODE = "type"
 IT_KEY_SERVICE_ACCOUNT_EXPIRATION = "expiration"
 
