@@ -1853,6 +1853,37 @@ class ITServiceTests(IdentityRequest):
             "an unparseable timestamp should fall back to the default instead of raising",
         )
 
+        # "NaN" and the infinities parse as floats but are not usable as sort keys, so they fall back too. NaN is
+        # the one that actually breaks a sort: every comparison against it is false, so a list containing one can
+        # come back out of numeric order.
+        for unorderable in ("NaN", "Infinity", "-Infinity"):
+            self.assertEqual(
+                float("inf"),
+                self.it_service._service_account_sort_key({"time_expires": unorderable}, "time_expires"),
+                f'the non finite timestamp "{unorderable}" should fall back to the default',
+            )
+
+            self.assertEqual(
+                0.0,
+                self.it_service._service_account_sort_key({"time_created": unorderable}, "time_created"),
+                f'the non finite timestamp "{unorderable}" should fall back to the default',
+            )
+
+        # Sorting a list which contains a NaN should still come back in numeric order.
+        service_accounts = [
+            {"clientId": "c", "time_expires": 1000},
+            {"clientId": "nan", "time_expires": "NaN"},
+            {"clientId": "a", "time_expires": 999},
+        ]
+
+        service_accounts.sort(key=lambda sa: self.it_service._service_account_sort_key(sa, "time_expires"))
+
+        self.assertEqual(
+            ["a", "c", "nan"],
+            [sa["clientId"] for sa in service_accounts],
+            "a NaN timestamp should sort with the accounts of unknown expiry rather than disturbing the order",
+        )
+
         # Non timestamp fields keep their case insensitive string comparison.
         self.assertEqual(
             "myserviceaccount",

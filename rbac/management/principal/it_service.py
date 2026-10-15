@@ -17,6 +17,7 @@
 """Class to manage interactions with the IT service accounts service."""
 
 import logging
+import math
 import time
 import uuid
 from typing import Any, Iterable, Optional, Tuple
@@ -455,9 +456,17 @@ class ITService:
             return str(service_account.get(field, "")).casefold()
 
         try:
-            return float(service_account[field])
+            timestamp = float(service_account[field])
         except (KeyError, TypeError, ValueError):
             return TIMESTAMP_ORDER_BY_FIELDS[field]
+
+        # "NaN" parses as a float but is unorderable: every comparison against it is false, so a list containing
+        # one can come back out of order. Fall back to the field's default, which is a sentinel we choose and is
+        # therefore ordered consistently against every real timestamp.
+        if not math.isfinite(timestamp):
+            return TIMESTAMP_ORDER_BY_FIELDS[field]
+
+        return timestamp
 
     def get_service_accounts_group(self, group: Group, user: User, options: dict[str, Any] = {}) -> list[dict]:
         """Get the service accounts for the given group."""

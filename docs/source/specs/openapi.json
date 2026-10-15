@@ -779,7 +779,7 @@
             "in": "query",
             "name": "order_by",
             "required": false,
-            "description": "Parameter for ordering principals by value. For inverse ordering, supply '-' before the param value, such as: ?order_by=-username. All options work for type of service-account principal, only username works for a user based principal.",
+            "description": "Parameter for ordering principals by value. For inverse ordering, supply '-' before the param value, such as: ?order_by=-username. All options work for type of service-account principal, only username works for a user based principal. Service accounts which are not Service Access Tokens have no expiry, so they sort after every expiring one when ordering by time_expires ascending.",
             "schema": {
               "type": "string",
               "enum": [
@@ -788,7 +788,8 @@
                 "owner",
                 "description",
                 "clientId",
-                "time_created"
+                "time_created",
+                "time_expires"
               ]
             }
           },
