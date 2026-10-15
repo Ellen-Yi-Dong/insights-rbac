@@ -24,7 +24,13 @@ import requests
 from django.conf import settings
 from django.test import override_settings
 from management.group.model import Group
-from management.principal.it_service import ITService, UnexpectedStatusCodeFromITError
+from management.principal.it_service import (
+    ITService,
+    IT_KEY_SERVICE_ACCOUNT_EXPIRATION,
+    IT_KEY_SERVICE_ACCOUNT_MODE,
+    IT_VALUE_MODE_SERVICE_ACCESS_TOKEN,
+    UnexpectedStatusCodeFromITError,
+)
 from management.principal.model import Principal
 from rest_framework import serializers, status
 from tests.identity_request import IdentityRequest
@@ -1658,6 +1664,263 @@ class ITServiceTests(IdentityRequest):
             self.fail('the "time_created" field is not present in the resulting model')
 
         self.assertEqual(created_at, result_time_created, 'the "time_created" field was not correctly transformed')
+
+    def test_transform_incoming_payload_service_access_token(self) -> None:
+        """Test that the service access token attributes from IT are mapped into our response structure."""
+        client_id = str(uuid.uuid4())
+        expiration = 1800000000
+
+        it_service_account = {
+            "clientId": client_id,
+            "name": "service-account-name",
+            "description": "service-account-description",
+            "createdBy": "service-account-owner",
+            "createdAt": 1700000000,
+            IT_KEY_SERVICE_ACCOUNT_MODE: IT_VALUE_MODE_SERVICE_ACCESS_TOKEN,
+            IT_KEY_SERVICE_ACCOUNT_EXPIRATION: expiration,
+        }
+
+        # Call the function under test.
+        result = self.it_service._transform_incoming_payload(service_account_from_it_service=it_service_account)
+
+        self.assertEqual(
+            IT_VALUE_MODE_SERVICE_ACCESS_TOKEN,
+            result.get("mode"),
+            'IT\'s mode attribute should have been mapped to the "mode" field',
+        )
+
+        self.assertEqual(
+            expiration,
+            result.get("time_expires"),
+            'IT\'s expiration attribute should have been mapped to the "time_expires" field',
+        )
+
+        self.assertEqual(
+            "service-account",
+            result["type"],
+            'the "type" field distinguishes service accounts from users and must stay "service-account" for service'
+            ' access tokens, since the SA/SAT distinction is carried by the "mode" field instead',
+        )
+
+    def test_transform_incoming_payload_regular_service_account(self) -> None:
+        """Test that a service account without the service access token attributes is transformed unchanged."""
+        it_service_account = {
+            "clientId": str(uuid.uuid4()),
+            "name": "service-account-name",
+            "description": "service-account-description",
+            "createdBy": "service-account-owner",
+            "createdAt": 1700000000,
+        }
+
+        # Call the function under test.
+        result = self.it_service._transform_incoming_payload(service_account_from_it_service=it_service_account)
+
+        self.assertNotIn(
+            "mode",
+            result,
+            'the "mode" field should be left out entirely when IT does not send the attribute, since an absent mode'
+            " means a regular service account",
+        )
+
+        self.assertNotIn(
+            "time_expires",
+            result,
+            'the "time_expires" field should be left out entirely when IT does not send the attribute',
+        )
+
+        self.assertEqual("service-account", result["type"], 'the "type" field should be unchanged')
+
+    def test_transform_incoming_payload_unexpected_service_access_token_values(self) -> None:
+        """Test how the transformation handles mode and expiration values we do not expect from IT."""
+        base_service_account = {
+            "clientId": str(uuid.uuid4()),
+            "name": "service-account-name",
+            "createdBy": "service-account-owner",
+            "createdAt": 1700000000,
+        }
+
+        # An unrecognised mode is passed through rather than dropped or rejected. RBAC proxies what IT sends here,
+        # and the closed set of valid values is enforced where the field is consumed, not where it is mapped.
+        unrecognised_mode = self.it_service._transform_incoming_payload(
+            service_account_from_it_service={
+                **base_service_account,
+                IT_KEY_SERVICE_ACCOUNT_MODE: "some-mode-we-do-not-know-about",
+            }
+        )
+
+        self.assertEqual(
+            "some-mode-we-do-not-know-about",
+            unrecognised_mode.get("mode"),
+            "an unrecognised mode from IT should be passed through untouched",
+        )
+
+        self.assertEqual(
+            "service-account",
+            unrecognised_mode["type"],
+            'an unrecognised mode should not affect the "type" field',
+        )
+
+        # Falsy values are treated as absent, consistent with every other field in the transformation.
+        falsy_values = self.it_service._transform_incoming_payload(
+            service_account_from_it_service={
+                **base_service_account,
+                IT_KEY_SERVICE_ACCOUNT_MODE: "",
+                IT_KEY_SERVICE_ACCOUNT_EXPIRATION: 0,
+            }
+        )
+
+        self.assertNotIn("mode", falsy_values, "an empty mode should be treated as an absent one")
+        self.assertNotIn("time_expires", falsy_values, "a zero expiration should be treated as an absent one")
+
+    def test_service_account_sort_key_timestamps_are_numeric(self) -> None:
+        """Test that timestamp fields sort numerically rather than as strings."""
+        # Timestamps with a differing number of digits are the case a string sort gets wrong: as strings "999"
+        # sorts after "1000".
+        service_accounts = [
+            {"clientId": "c", "time_expires": 1000},
+            {"clientId": "a", "time_expires": 999},
+            {"clientId": "b", "time_expires": 1001},
+        ]
+
+        service_accounts.sort(key=lambda sa: self.it_service._service_account_sort_key(sa, "time_expires"))
+
+        self.assertEqual(
+            ["a", "c", "b"],
+            [sa["clientId"] for sa in service_accounts],
+            "the timestamps should have been compared as numbers, not as strings",
+        )
+
+    def test_service_account_sort_key_missing_and_string_fields(self) -> None:
+        """Test the sort key for service accounts missing a timestamp, and for the non-timestamp fields."""
+        # A regular service account has no expiry, so it should sort after every expiring one when ascending.
+        self.assertEqual(
+            float("inf"),
+            self.it_service._service_account_sort_key({"clientId": "a"}, "time_expires"),
+            "a service account without an expiry should sort last when ascending",
+        )
+
+        # An unknown creation time keeps sorting first, matching what the previous string based sort did.
+        self.assertEqual(
+            0.0,
+            self.it_service._service_account_sort_key({"clientId": "a"}, "time_created"),
+            "a service account without a creation time should keep sorting first when ascending",
+        )
+
+        # A timestamp we cannot parse falls back to the same default rather than raising.
+        self.assertEqual(
+            float("inf"),
+            self.it_service._service_account_sort_key({"time_expires": "not-a-timestamp"}, "time_expires"),
+            "an unparseable timestamp should fall back to the default instead of raising",
+        )
+
+        # Non timestamp fields keep their case insensitive string comparison.
+        self.assertEqual(
+            "myserviceaccount",
+            self.it_service._service_account_sort_key({"name": "MyServiceAccount"}, "name"),
+            "non timestamp fields should keep being compared as case insensitive strings",
+        )
+
+        self.assertEqual(
+            "",
+            self.it_service._service_account_sort_key({}, "name"),
+            "a missing string field should keep sorting as an empty string",
+        )
+
+    def test_get_mock_service_accounts_includes_both_modes(self) -> None:
+        """Test that the mocked IT responses contain both regular service accounts and service access tokens."""
+        principals = []
+        for _ in range(20):
+            principal = Principal()
+            principal.service_account_id = str(uuid.uuid4())
+            principal.username = f"service-account-{principal.service_account_id}"
+            principals.append(principal)
+
+        # Call the function under test.
+        results = self.it_service._get_mock_service_accounts(service_account_principals=principals)
+
+        service_access_tokens = [result for result in results if "mode" in result]
+        regular_service_accounts = [result for result in results if "mode" not in result]
+
+        self.assertTrue(
+            len(service_access_tokens) > 0,
+            "the mocked service accounts should contain at least one service access token so that the environments"
+            " which bypass IT exercise that shape",
+        )
+
+        self.assertTrue(
+            len(regular_service_accounts) > 0,
+            "the mocked service accounts should contain at least one regular service account",
+        )
+
+        for service_access_token in service_access_tokens:
+            self.assertEqual(
+                IT_VALUE_MODE_SERVICE_ACCESS_TOKEN,
+                service_access_token["mode"],
+                "the mocked service access token should carry the service access token mode",
+            )
+
+            self.assertIn(
+                "time_expires",
+                service_access_token,
+                "the mocked service access token should carry an expiration time",
+            )
+
+        for regular_service_account in regular_service_accounts:
+            self.assertNotIn(
+                "time_expires",
+                regular_service_account,
+                "a mocked regular service account should not carry an expiration time",
+            )
+
+        # The mode is derived from the client ID so that it does not change from one request to the next.
+        repeated_results = self.it_service._get_mock_service_accounts(service_account_principals=principals)
+
+        self.assertEqual(
+            [result.get("mode") for result in results],
+            [result.get("mode") for result in repeated_results],
+            "the mocked mode should be stable for a given service account across calls",
+        )
+
+    def test_merge_principals_it_service_accounts_keeps_service_access_token_fields(self) -> None:
+        """Test that merging the IT service accounts with our principals does not drop the new fields."""
+        client_id = str(uuid.uuid4())
+
+        principal = Principal()
+        principal.username = f"service-account-{client_id}"
+
+        it_service_accounts = [
+            {
+                "clientId": client_id,
+                "mode": IT_VALUE_MODE_SERVICE_ACCESS_TOKEN,
+                "time_expires": 1800000000,
+            }
+        ]
+
+        # Call the function under test.
+        results = self.it_service._merge_principals_it_service_accounts(
+            service_account_principals={client_id: principal},
+            it_service_accounts=it_service_accounts,
+            options={},
+        )
+
+        self.assertEqual(1, len(results), "the service account should have been merged with our principal")
+        self.assertEqual(
+            IT_VALUE_MODE_SERVICE_ACCESS_TOKEN, results[0]["mode"], 'the "mode" field should have been preserved'
+        )
+        self.assertEqual(1800000000, results[0]["time_expires"], 'the "time_expires" field should have been preserved')
+
+        # When only the usernames are requested the rest of the payload is dropped, including the new fields.
+        filtered_results = self.it_service._merge_principals_it_service_accounts(
+            service_account_principals={client_id: principal},
+            it_service_accounts=it_service_accounts,
+            options={"username_only": "true"},
+        )
+
+        self.assertEqual(
+            [{"username": principal.username}],
+            filtered_results,
+            'the "username_only" option should still return just the username',
+        )
 
     def test_merge_principals_it_service_accounts(self) -> None:
         """Test that the function under test correctly merges service account principals and database principals."""
