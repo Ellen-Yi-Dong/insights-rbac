@@ -18,7 +18,6 @@
 
 import logging
 import math
-import time
 import uuid
 from typing import Any, Iterable, Optional, Tuple
 
@@ -42,17 +41,11 @@ KEY_SERVICE_ACCOUNT = "service-account-"
 IT_PATH_GET_SERVICE_ACCOUNTS = "/service_accounts/v1"
 
 # Keys IT uses for the "service access token" attributes on a service account. IT only sets these for service
-# accounts created in service access token mode, so they are absent for every regular service account.
-
-IT_KEY_SERVICE_ACCOUNT_MODE = "type"
+# accounts created in service access token mode, so they are absent for every regular service account. IT calls
+# the first one "type", which is why we re-expose it as "service_account_type": our own "type" already means
+# "user or service account" and the console filters on it.
+IT_KEY_SERVICE_ACCOUNT_TYPE = "type"
 IT_KEY_SERVICE_ACCOUNT_EXPIRATION = "expiration"
-
-# Mode value marking a service account as a service access token. Only used to build mocked IT responses; real
-# responses are passed through with whatever value IT sent.
-IT_VALUE_MODE_SERVICE_ACCESS_TOKEN = "service-access-token"
-
-# Default lifetime of a service access token, per CIAM-ADR-00090. Only used to build mocked IT responses.
-MOCK_SERVICE_ACCESS_TOKEN_LIFETIME_SECONDS = 90 * 24 * 60 * 60
 
 # Service account fields holding a Unix timestamp, mapped to the sort key used when the field is missing or is not
 # a number. A regular service account has no expiry, so it sorts after every expiring one when ascending. An
@@ -597,7 +590,7 @@ class ITService:
         created_by = service_account_from_it_service.get("createdBy")
         created_at = service_account_from_it_service.get("createdAt")
         user_id = service_account_from_it_service.get("userId")
-        mode = service_account_from_it_service.get(IT_KEY_SERVICE_ACCOUNT_MODE)
+        service_account_type = service_account_from_it_service.get(IT_KEY_SERVICE_ACCOUNT_TYPE)
         expiration = service_account_from_it_service.get(IT_KEY_SERVICE_ACCOUNT_EXPIRATION)
 
         if client_id:
@@ -619,14 +612,14 @@ class ITService:
             service_account["userId"] = user_id
 
         # Hard code the type for every service account. This stays "service-account" for service access tokens too:
-        # "type" distinguishes service accounts from users, and "mode" distinguishes a service access token from a
-        # regular service account.
+        # "type" distinguishes service accounts from users, and "service_account_type" distinguishes a service
+        # access token from a regular service account.
         service_account["type"] = "service-account"
 
         # IT only returns these for service accounts created in "service access token" mode, so an absent value means
         # a regular service account and we leave the keys out of the response entirely.
-        if mode:
-            service_account["mode"] = mode
+        if service_account_type:
+            service_account["service_account_type"] = service_account_type
 
         if expiration:
             service_account["time_expires"] = expiration
@@ -685,43 +678,19 @@ class ITService:
         return service_accounts
 
     def _get_mock_service_accounts(self, service_account_principals: Iterable[Principal]) -> list[dict]:
-        """Mock an IT service call which returns service accounts. Useful for development or testing."""
-        mocked_service_accounts: list[dict] = []
-        now = round(time.time())
-        for sap in service_account_principals:
-            mocked_account = {
-                "id": sap.service_account_id,
-                "clientId": sap.service_account_id,
-                "name": f"{sap.service_account_id}-name",
-                "description": f"{sap.service_account_id}-description",
-                "createdBy": sap.username,
-                "createdAt": now,
-            }
+        """Mock an IT service call which returns service accounts. Useful for development or testing.
 
-            # Mock a mix of regular service accounts and service access tokens so that both shapes get exercised in
-            # the environments which bypass IT. The choice is derived from the client ID so that it is stable for a
-            # given service account across requests.
-            if self._mock_is_service_access_token(sap.service_account_id):
-                mocked_account[IT_KEY_SERVICE_ACCOUNT_MODE] = IT_VALUE_MODE_SERVICE_ACCESS_TOKEN
-                mocked_account[IT_KEY_SERVICE_ACCOUNT_EXPIRATION] = now + MOCK_SERVICE_ACCESS_TOKEN_LIFETIME_SECONDS
-
-            # Transform the service account to the structure our logic works with and then append it to the list of
-            # mocked service accounts we will be returning.
-            mocked_service_accounts.append(self._transform_incoming_payload(mocked_account))
-
-        return mocked_service_accounts
-
-    @staticmethod
-    def _mock_is_service_access_token(client_id: Optional[str]) -> bool:
-        """Decide whether a mocked service account should be presented as a service access token.
-
-        Derived from the client ID rather than randomised so that a given service account keeps the same mode for
-        every request, the way a real one would. Only used when IT calls are bypassed.
+        The payloads are built in IT's shape and then run through the same transformation a real response goes
+        through, so the bypassed path still exercises the real mapping.
         """
-        if not client_id:
-            return False
+        # Imported here rather than at module scope so that the mock module can import our IT key names without
+        # creating a circular import.
+        from management.principal.it_service_mocks import build_it_service_accounts
 
-        return client_id[-1] in "02468ace"
+        return [
+            self._transform_incoming_payload(it_service_account)
+            for it_service_account in build_it_service_accounts(service_account_principals)
+        ]
 
     def _filtered_service_accounts(
         self,

@@ -1241,7 +1241,7 @@ class PrincipalViewsetServiceAccountTests(IdentityRequest):
         mocked_values = copy.deepcopy(self.mocked_values)
         for mocked_value in mocked_values:
             if mocked_value["clientId"] == sat_client_id:
-                mocked_value["mode"] = "service-access-token"
+                mocked_value["service_account_type"] = "service-access-token"
                 mocked_value["time_expires"] = 1713876532
 
         mock_request.return_value = mocked_values
@@ -1258,11 +1258,11 @@ class PrincipalViewsetServiceAccountTests(IdentityRequest):
             3,
             len(returned_service_accounts),
             "filtering by the service-account type must keep returning service access tokens alongside regular"
-            " service accounts, since the SA/SAT distinction is carried by the mode field and not by the type",
+            " service accounts, since the SA/SAT distinction is carried by the service_account_type field and not by the type",
         )
 
         service_access_token = returned_service_accounts[sat_client_id]
-        self.assertEqual("service-access-token", service_access_token.get("mode"))
+        self.assertEqual("service-access-token", service_access_token.get("service_account_type"))
         self.assertEqual(1713876532, service_access_token.get("time_expires"))
         self.assertEqual(
             "service-account",
@@ -1291,7 +1291,7 @@ class PrincipalViewsetServiceAccountTests(IdentityRequest):
 
         mocked_values = copy.deepcopy(self.mocked_values)
         for mocked_value in mocked_values:
-            mocked_value["mode"] = "service-access-token"
+            mocked_value["service_account_type"] = "service-access-token"
             mocked_value["time_expires"] = expirations[mocked_value["clientId"]]
 
         mock_request.return_value = mocked_values
@@ -1369,7 +1369,7 @@ class PrincipalViewsetServiceAccountTests(IdentityRequest):
                 list(service_account.keys()),
                 ["clientId", "name", "description", "owner", "time_created", "type", "username"],
             )
-            self.assertNotIn("mode", service_account)
+            self.assertNotIn("service_account_type", service_account)
             self.assertNotIn("time_expires", service_account)
 
     @override_settings(IT_BYPASS_TOKEN_VALIDATION=True)

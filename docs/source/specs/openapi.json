@@ -3469,7 +3469,7 @@
             "type": "integer",
             "example": 1706100532
           },
-          "mode": {
+          "service_account_type": {
             "type": "string",
             "description": "Distinguishes a Service Access Token from a regular Service Account. Omitted entirely for regular Service Accounts, so an absent value must be treated as a regular Service Account. Note this is separate from 'type', which stays 'service-account' for both.",
             "example": "service-access-token"

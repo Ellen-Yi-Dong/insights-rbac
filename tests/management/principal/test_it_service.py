@@ -27,10 +27,10 @@ from management.group.model import Group
 from management.principal.it_service import (
     ITService,
     IT_KEY_SERVICE_ACCOUNT_EXPIRATION,
-    IT_KEY_SERVICE_ACCOUNT_MODE,
-    IT_VALUE_MODE_SERVICE_ACCESS_TOKEN,
+    IT_KEY_SERVICE_ACCOUNT_TYPE,
     UnexpectedStatusCodeFromITError,
 )
+from management.principal.it_service_mocks import MOCK_SERVICE_ACCOUNT_TYPE_SERVICE_ACCESS_TOKEN
 from management.principal.model import Principal
 from rest_framework import serializers, status
 from tests.identity_request import IdentityRequest
@@ -95,10 +95,10 @@ class ITServiceTests(IdentityRequest):
                 "createdAt": f"createdAt-{client_id}",
             }
 
-            # Note IT's "type" key holds the mode, and is unrelated to the "type" RBAC returns, which stays
+            # Note IT's "type" key holds the service account type, and is unrelated to the "type" RBAC returns, which stays
             # "service-account" for both shapes. IT leaves these keys out for regular service accounts.
             if i % 2 == 0:
-                service_account[IT_KEY_SERVICE_ACCOUNT_MODE] = IT_VALUE_MODE_SERVICE_ACCESS_TOKEN
+                service_account[IT_KEY_SERVICE_ACCOUNT_TYPE] = MOCK_SERVICE_ACCOUNT_TYPE_SERVICE_ACCESS_TOKEN
                 service_account[IT_KEY_SERVICE_ACCOUNT_EXPIRATION] = 1713876532 + i
 
             service_accounts.append(service_account)
@@ -325,12 +325,12 @@ class ITServiceTests(IdentityRequest):
             # Assert that the service access token attributes survived the round trip. The mapping rules
             # themselves are covered by the transformation tests; what this guards is that the fetching,
             # pagination and client ID filtering in between do not drop the fields on their way back out.
-            it_sa_mode = it_sa.get(IT_KEY_SERVICE_ACCOUNT_MODE)
+            it_sa_mode = it_sa.get(IT_KEY_SERVICE_ACCOUNT_TYPE)
             if it_sa_mode:
                 self.assertEqual(
                     it_sa_mode,
-                    rbac_sa.get("mode"),
-                    "the mode for the RBAC and IT models do not match",
+                    rbac_sa.get("service_account_type"),
+                    "the service_account_type for the RBAC and IT models do not match",
                 )
 
                 self.assertEqual(
@@ -340,9 +340,9 @@ class ITServiceTests(IdentityRequest):
                 )
             else:
                 self.assertNotIn(
-                    "mode",
+                    "service_account_type",
                     rbac_sa,
-                    "a service account which IT did not flag should come back without the mode key",
+                    "a service account which IT did not flag should come back without the service_account_type key",
                 )
 
                 self.assertNotIn(
@@ -1716,7 +1716,7 @@ class ITServiceTests(IdentityRequest):
             "description": "service-account-description",
             "createdBy": "service-account-owner",
             "createdAt": 1700000000,
-            IT_KEY_SERVICE_ACCOUNT_MODE: IT_VALUE_MODE_SERVICE_ACCESS_TOKEN,
+            IT_KEY_SERVICE_ACCOUNT_TYPE: MOCK_SERVICE_ACCOUNT_TYPE_SERVICE_ACCESS_TOKEN,
             IT_KEY_SERVICE_ACCOUNT_EXPIRATION: expiration,
         }
 
@@ -1724,9 +1724,9 @@ class ITServiceTests(IdentityRequest):
         result = self.it_service._transform_incoming_payload(service_account_from_it_service=it_service_account)
 
         self.assertEqual(
-            IT_VALUE_MODE_SERVICE_ACCESS_TOKEN,
-            result.get("mode"),
-            'IT\'s mode attribute should have been mapped to the "mode" field',
+            MOCK_SERVICE_ACCOUNT_TYPE_SERVICE_ACCESS_TOKEN,
+            result.get("service_account_type"),
+            'IT\'s type attribute should have been mapped to the "service_account_type" field',
         )
 
         self.assertEqual(
@@ -1739,7 +1739,7 @@ class ITServiceTests(IdentityRequest):
             "service-account",
             result["type"],
             'the "type" field distinguishes service accounts from users and must stay "service-account" for service'
-            ' access tokens, since the SA/SAT distinction is carried by the "mode" field instead',
+            ' access tokens, since the SA/SAT distinction is carried by the "service_account_type" field instead',
         )
 
     def test_transform_incoming_payload_regular_service_account(self) -> None:
@@ -1756,9 +1756,9 @@ class ITServiceTests(IdentityRequest):
         result = self.it_service._transform_incoming_payload(service_account_from_it_service=it_service_account)
 
         self.assertNotIn(
-            "mode",
+            "service_account_type",
             result,
-            'the "mode" field should be left out entirely when IT does not send the attribute, since an absent mode'
+            'the "service_account_type" field should be left out entirely when IT does not send the attribute, since an absent value'
             " means a regular service account",
         )
 
@@ -1771,7 +1771,7 @@ class ITServiceTests(IdentityRequest):
         self.assertEqual("service-account", result["type"], 'the "type" field should be unchanged')
 
     def test_transform_incoming_payload_unexpected_service_access_token_values(self) -> None:
-        """Test how the transformation handles mode and expiration values we do not expect from IT."""
+        """Test how the transformation handles type and expiration values we do not expect from IT."""
         base_service_account = {
             "clientId": str(uuid.uuid4()),
             "name": "service-account-name",
@@ -1779,37 +1779,39 @@ class ITServiceTests(IdentityRequest):
             "createdAt": 1700000000,
         }
 
-        # An unrecognised mode is passed through rather than dropped or rejected. RBAC proxies what IT sends here,
+        # An unrecognised service account type is passed through rather than dropped or rejected. RBAC proxies what IT sends here,
         # and the closed set of valid values is enforced where the field is consumed, not where it is mapped.
         unrecognised_mode = self.it_service._transform_incoming_payload(
             service_account_from_it_service={
                 **base_service_account,
-                IT_KEY_SERVICE_ACCOUNT_MODE: "some-mode-we-do-not-know-about",
+                IT_KEY_SERVICE_ACCOUNT_TYPE: "some-mode-we-do-not-know-about",
             }
         )
 
         self.assertEqual(
             "some-mode-we-do-not-know-about",
-            unrecognised_mode.get("mode"),
-            "an unrecognised mode from IT should be passed through untouched",
+            unrecognised_mode.get("service_account_type"),
+            "an unrecognised service account type from IT should be passed through untouched",
         )
 
         self.assertEqual(
             "service-account",
             unrecognised_mode["type"],
-            'an unrecognised mode should not affect the "type" field',
+            'an unrecognised service account type should not affect the "type" field',
         )
 
         # Falsy values are treated as absent, consistent with every other field in the transformation.
         falsy_values = self.it_service._transform_incoming_payload(
             service_account_from_it_service={
                 **base_service_account,
-                IT_KEY_SERVICE_ACCOUNT_MODE: "",
+                IT_KEY_SERVICE_ACCOUNT_TYPE: "",
                 IT_KEY_SERVICE_ACCOUNT_EXPIRATION: 0,
             }
         )
 
-        self.assertNotIn("mode", falsy_values, "an empty mode should be treated as an absent one")
+        self.assertNotIn(
+            "service_account_type", falsy_values, "an empty service account type should be treated as an absent one"
+        )
         self.assertNotIn("time_expires", falsy_values, "a zero expiration should be treated as an absent one")
 
     def test_service_account_sort_key_timestamps_are_numeric(self) -> None:
@@ -1909,8 +1911,8 @@ class ITServiceTests(IdentityRequest):
         # Call the function under test.
         results = self.it_service._get_mock_service_accounts(service_account_principals=principals)
 
-        service_access_tokens = [result for result in results if "mode" in result]
-        regular_service_accounts = [result for result in results if "mode" not in result]
+        service_access_tokens = [result for result in results if "service_account_type" in result]
+        regular_service_accounts = [result for result in results if "service_account_type" not in result]
 
         self.assertTrue(
             len(service_access_tokens) > 0,
@@ -1925,9 +1927,9 @@ class ITServiceTests(IdentityRequest):
 
         for service_access_token in service_access_tokens:
             self.assertEqual(
-                IT_VALUE_MODE_SERVICE_ACCESS_TOKEN,
-                service_access_token["mode"],
-                "the mocked service access token should carry the service access token mode",
+                MOCK_SERVICE_ACCOUNT_TYPE_SERVICE_ACCESS_TOKEN,
+                service_access_token["service_account_type"],
+                "the mocked service access token should carry the service access token type",
             )
 
             self.assertIn(
@@ -1943,13 +1945,13 @@ class ITServiceTests(IdentityRequest):
                 "a mocked regular service account should not carry an expiration time",
             )
 
-        # The mode is derived from the client ID so that it does not change from one request to the next.
+        # The type is derived from the client ID so that it does not change from one request to the next.
         repeated_results = self.it_service._get_mock_service_accounts(service_account_principals=principals)
 
         self.assertEqual(
-            [result.get("mode") for result in results],
-            [result.get("mode") for result in repeated_results],
-            "the mocked mode should be stable for a given service account across calls",
+            [result.get("service_account_type") for result in results],
+            [result.get("service_account_type") for result in repeated_results],
+            "the mocked service account type should be stable for a given service account across calls",
         )
 
     def test_merge_principals_it_service_accounts_keeps_service_access_token_fields(self) -> None:
@@ -1962,7 +1964,7 @@ class ITServiceTests(IdentityRequest):
         it_service_accounts = [
             {
                 "clientId": client_id,
-                "mode": IT_VALUE_MODE_SERVICE_ACCESS_TOKEN,
+                "service_account_type": MOCK_SERVICE_ACCOUNT_TYPE_SERVICE_ACCESS_TOKEN,
                 "time_expires": 1800000000,
             }
         ]
@@ -1976,7 +1978,9 @@ class ITServiceTests(IdentityRequest):
 
         self.assertEqual(1, len(results), "the service account should have been merged with our principal")
         self.assertEqual(
-            IT_VALUE_MODE_SERVICE_ACCESS_TOKEN, results[0]["mode"], 'the "mode" field should have been preserved'
+            MOCK_SERVICE_ACCOUNT_TYPE_SERVICE_ACCESS_TOKEN,
+            results[0]["service_account_type"],
+            'the "service_account_type" field should have been preserved',
         )
         self.assertEqual(1800000000, results[0]["time_expires"], 'the "time_expires" field should have been preserved')
 
