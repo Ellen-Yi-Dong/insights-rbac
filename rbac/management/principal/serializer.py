@@ -86,8 +86,10 @@ class ServiceAccountSerializer(serializers.Serializer):
     # IT only sends these for service accounts created in service access token mode. Declared as optional so that a
     # regular service account is serialized exactly as it was before, with the keys left out entirely rather than
     # rendered as null.
-    # Not a ChoiceField: the set of values IT sends is still being confirmed in CIAM-12318, and rejecting an
-    # unrecognised one would fail the whole response rather than degrading to "treat it as a regular SA".
+    # CIAM-12576 confirms the current set as "service_access_token" or omitted, which is what the OpenAPI enum
+    # documents. Still a CharField rather than a ChoiceField: "current" implies the set can grow, and rejecting
+    # an unrecognised value would fail the whole response instead of degrading to "treat it as a regular
+    # service account", which is already the documented meaning of an absent value.
     service_account_type = serializers.CharField(required=False)
     time_expires = serializers.IntegerField(required=False)
     username = serializers.CharField()

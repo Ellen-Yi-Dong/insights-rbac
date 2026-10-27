@@ -2963,7 +2963,7 @@ class GroupPrincipalViewsetTests(GroupViewsetTests):
             }
 
             if uuid == sat_client_id:
-                mocked_value["service_account_type"] = "service-access-token"
+                mocked_value["service_account_type"] = "service_access_token"
                 mocked_value["time_expires"] = 1713876532
 
             mocked_values.append(mocked_value)
@@ -2982,7 +2982,7 @@ class GroupPrincipalViewsetTests(GroupViewsetTests):
         returned_service_accounts = {str(sa["clientId"]): sa for sa in response.data.get("data")}
 
         service_access_token = returned_service_accounts[sat_client_id]
-        self.assertEqual("service-access-token", service_access_token.get("service_account_type"))
+        self.assertEqual("service_access_token", service_access_token.get("service_account_type"))
         self.assertEqual(1713876532, service_access_token.get("time_expires"))
         self.assertEqual(
             "service-account",

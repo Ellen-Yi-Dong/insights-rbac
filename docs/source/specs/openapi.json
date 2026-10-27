@@ -3471,8 +3471,11 @@
           },
           "service_account_type": {
             "type": "string",
-            "description": "Distinguishes a Service Access Token from a regular Service Account. Omitted entirely for regular Service Accounts, so an absent value must be treated as a regular Service Account. Note this is separate from 'type', which stays 'service-account' for both.",
-            "example": "service-access-token"
+            "description": "Distinguishes a Service Access Token from a regular Service Account. Omitted entirely for regular Service Accounts, so an absent value must be treated as a regular Service Account. Note this is separate from 'type', which stays 'service-account' for both. The value is passed through from the identity service, whose current set is 'service_access_token' or omitted; clients should tolerate an unrecognised value by treating it as a regular Service Account.",
+            "enum": [
+              "service_access_token"
+            ],
+            "example": "service_access_token"
           },
           "time_expires": {
             "type": "integer",

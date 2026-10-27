@@ -28,9 +28,10 @@ from typing import Any, Iterable, Optional
 
 from management.principal.model import Principal
 
-# Value marking a mocked service account as a service access token. Real responses are passed through with
+# Value marking a mocked service account as a service access token. Matches the value the identity service
+# sends, confirmed in CIAM-12576 as "service_access_token" or omitted. Real responses are passed through with
 # whatever value IT sent, so this is never compared against a real payload.
-MOCK_SERVICE_ACCOUNT_TYPE_SERVICE_ACCESS_TOKEN = "service-access-token"
+MOCK_SERVICE_ACCOUNT_TYPE_SERVICE_ACCESS_TOKEN = "service_access_token"
 
 # Default lifetime of a service access token, per CIAM-ADR-00090.
 MOCK_SERVICE_ACCESS_TOKEN_LIFETIME_SECONDS = 90 * 24 * 60 * 60
