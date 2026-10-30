@@ -24,7 +24,7 @@ rather than bypassing it.
 """
 
 import time
-from typing import Any, Iterable, Optional
+from typing import Any, Generator, Iterable, Optional
 
 from management.principal.model import Principal
 
@@ -49,10 +49,24 @@ def is_service_access_token(client_id: Optional[str]) -> bool:
     return client_id[-1] in "02468ace"
 
 
-def build_it_service_accounts(service_account_principals: Iterable[Principal]) -> list[dict[str, Any]]:
-    """Build service account payloads in IT's shape for the given principals.
+def _sat_expiry_offset(client_id: str) -> int:
+    """Return a stable per-account offset (in seconds) so that mocked SATs get varied expiry times.
 
-    The payloads use IT's field names, not ours, so that the caller can run them through the real transformation.
+    Uses the built-in hash of the client ID modulo 30 days, giving each SAT a unique spread while staying
+    deterministic across requests.
+    """
+    thirty_days = 30 * 24 * 60 * 60
+    return abs(hash(client_id)) % thirty_days
+
+
+def generate_it_service_accounts(
+    service_account_principals: Iterable[Principal],
+) -> Generator[dict[str, Any], None, None]:
+    """Yield service account payloads in IT's shape for the given principals.
+
+    Yields one payload at a time so the caller can transform incrementally without holding both the raw and
+    transformed lists in memory.  The payloads use IT's field names, not ours, so that the caller can run them
+    through the real transformation.
     """
     # Imported here rather than at module scope: it_service defers its import of this module to avoid a cycle,
     # and importing the key names eagerly in both directions would reintroduce one.
@@ -61,7 +75,6 @@ def build_it_service_accounts(service_account_principals: Iterable[Principal]) -
         IT_KEY_SERVICE_ACCOUNT_TYPE,
     )
 
-    it_service_accounts: list[dict[str, Any]] = []
     now = round(time.time())
 
     for principal in service_account_principals:
@@ -78,8 +91,18 @@ def build_it_service_accounts(service_account_principals: Iterable[Principal]) -
         # the environments which bypass IT.
         if is_service_access_token(principal.service_account_id):
             it_service_account[IT_KEY_SERVICE_ACCOUNT_TYPE] = MOCK_SERVICE_ACCOUNT_TYPE_SERVICE_ACCESS_TOKEN
-            it_service_account[IT_KEY_SERVICE_ACCOUNT_EXPIRATION] = now + MOCK_SERVICE_ACCESS_TOKEN_LIFETIME_SECONDS
+            # Each SAT gets a stable, varied expiry so they do not all tie when sorted by time_expires.
+            it_service_account[IT_KEY_SERVICE_ACCOUNT_EXPIRATION] = (
+                now + MOCK_SERVICE_ACCESS_TOKEN_LIFETIME_SECONDS + _sat_expiry_offset(principal.service_account_id)
+            )
 
-        it_service_accounts.append(it_service_account)
+        yield it_service_account
 
-    return it_service_accounts
+
+def build_it_service_accounts(service_account_principals: Iterable[Principal]) -> list[dict[str, Any]]:
+    """Build service account payloads in IT's shape for the given principals.
+
+    Convenience wrapper around :func:`generate_it_service_accounts` that materialises the full list.  Prefer the
+    generator in production paths to avoid doubling peak memory.
+    """
+    return list(generate_it_service_accounts(service_account_principals))

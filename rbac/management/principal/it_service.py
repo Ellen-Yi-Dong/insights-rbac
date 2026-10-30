@@ -388,10 +388,15 @@ class ITService:
         else:
             service_account_principals = service_account_principals.order_by("-username")
 
+        # Always fetch full records for sorting and filtering; username_only projection is deferred until after
+        # pagination so that timestamp and tiebreaker fields are available for ordering.
+        username_only = options.get("username_only")
+        fetch_options = {k: v for k, v in options.items() if k != "username_only"} if username_only else options
+
         service_accounts = self._filtered_service_accounts(
             user=user,
             service_account_principals=service_account_principals,
-            options=options,
+            options=fetch_options,
         )
 
         # We always set a default offset and a limit if the user doesn't specify them, so it is safe to simply put the
@@ -436,6 +441,10 @@ class ITService:
         # flake8 ignore E203 = Whitespace before ':' -> false positive https://github.com/PyCQA/pycodestyle/issues/373
         service_accounts = service_accounts[offset : offset + limit]  # type: ignore # noqa: E203
 
+        # Project to username-only after sorting and pagination so that timestamp sort keys are available above.
+        if username_only and username_only == "true":
+            service_accounts = [{"username": sa["username"]} for sa in service_accounts]
+
         return service_accounts, count
 
     @staticmethod
@@ -444,22 +453,28 @@ class ITService:
 
         Timestamp fields need a numeric key. Coercing them to strings sorts "999" after "1000", which only looks
         correct today because every timestamp we store happens to have the same number of digits.
+
+        When the primary key ties (e.g. every regular account has no expiry), the ``clientId`` is appended as a
+        stable tiebreaker so that offset pagination neither repeats nor omits accounts across workers.
         """
+        # Stable tiebreaker shared by both branches below.
+        tiebreaker = str(service_account.get("clientId", ""))
+
         if field not in TIMESTAMP_ORDER_BY_FIELDS:
-            return str(service_account.get(field, "")).casefold()
+            return (str(service_account.get(field, "")).casefold(), tiebreaker)
 
         try:
             timestamp = float(service_account[field])
         except (KeyError, TypeError, ValueError):
-            return TIMESTAMP_ORDER_BY_FIELDS[field]
+            return (TIMESTAMP_ORDER_BY_FIELDS[field], tiebreaker)
 
         # "NaN" parses as a float but is unorderable: every comparison against it is false, so a list containing
         # one can come back out of order. Fall back to the field's default, which is a sentinel we choose and is
         # therefore ordered consistently against every real timestamp.
         if not math.isfinite(timestamp):
-            return TIMESTAMP_ORDER_BY_FIELDS[field]
+            return (TIMESTAMP_ORDER_BY_FIELDS[field], tiebreaker)
 
-        return timestamp
+        return (timestamp, tiebreaker)
 
     def get_service_accounts_group(self, group: Group, user: User, options: dict[str, Any] = {}) -> list[dict]:
         """Get the service accounts for the given group."""
@@ -682,14 +697,17 @@ class ITService:
 
         The payloads are built in IT's shape and then run through the same transformation a real response goes
         through, so the bypassed path still exercises the real mapping.
+
+        The mock generator yields one payload at a time so that the raw and transformed lists are not both held
+        in memory at once.
         """
         # Imported here rather than at module scope so that the mock module can import our IT key names without
         # creating a circular import.
-        from management.principal.it_service_mocks import build_it_service_accounts
+        from management.principal.it_service_mocks import generate_it_service_accounts
 
         return [
             self._transform_incoming_payload(it_service_account)
-            for it_service_account in build_it_service_accounts(service_account_principals)
+            for it_service_account in generate_it_service_accounts(service_account_principals)
         ]
 
     def _filtered_service_accounts(

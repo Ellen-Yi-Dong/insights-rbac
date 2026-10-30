@@ -1742,6 +1742,47 @@ class ITServiceTests(IdentityRequest):
             ' access tokens, since the SA/SAT distinction is carried by the "service_account_type" field instead',
         )
 
+    def test_transform_incoming_payload_raw_it_wire_keys(self) -> None:
+        """Test transformation using literal IT wire keys rather than imported constants.
+
+        This guards against a mapping regression where the constants themselves drift from IT's actual contract.
+        The keys used here are the literal strings from the verified IT contract (CIAM-ADR-00090).
+        """
+        client_id = str(uuid.uuid4())
+        expiration = 1800000000
+
+        # Literal IT wire keys — NOT using IT_KEY_SERVICE_ACCOUNT_TYPE / IT_KEY_SERVICE_ACCOUNT_EXPIRATION.
+        it_service_account = {
+            "clientId": client_id,
+            "name": "raw-wire-name",
+            "description": "raw-wire-description",
+            "createdBy": "raw-wire-owner",
+            "createdAt": 1700000000,
+            "type": "service_access_token",
+            "expiration": expiration,
+        }
+
+        result = self.it_service._transform_incoming_payload(service_account_from_it_service=it_service_account)
+
+        self.assertEqual(
+            "service_access_token",
+            result.get("service_account_type"),
+            'literal IT wire key "type" must map to "service_account_type" in the response',
+        )
+        self.assertEqual(
+            expiration,
+            result.get("time_expires"),
+            'literal IT wire key "expiration" must map to "time_expires" in the response',
+        )
+        self.assertEqual(
+            "service-account",
+            result["type"],
+            'the response "type" must stay "service-account" regardless of the IT wire "type" value',
+        )
+        self.assertEqual(client_id, result["clientId"], "clientId must be passed through")
+        self.assertEqual("raw-wire-owner", result["owner"], '"createdBy" must map to "owner"')
+        self.assertEqual(1700000000, result["time_created"], '"createdAt" must map to "time_created"')
+
     def test_transform_incoming_payload_regular_service_account(self) -> None:
         """Test that a service account without the service access token attributes is transformed unchanged."""
         it_service_account = {
@@ -1833,24 +1874,27 @@ class ITServiceTests(IdentityRequest):
         )
 
     def test_service_account_sort_key_missing_and_string_fields(self) -> None:
-        """Test the sort key for service accounts missing a timestamp, and for the non-timestamp fields."""
+        """Test the sort key for service accounts missing a timestamp, and for the non-timestamp fields.
+
+        The sort key is a tuple ``(primary, tiebreaker)`` where the tiebreaker is the ``clientId``.
+        """
         # A regular service account has no expiry, so it should sort after every expiring one when ascending.
         self.assertEqual(
-            float("inf"),
+            (float("inf"), "a"),
             self.it_service._service_account_sort_key({"clientId": "a"}, "time_expires"),
             "a service account without an expiry should sort last when ascending",
         )
 
         # An unknown creation time keeps sorting first, matching what the previous string based sort did.
         self.assertEqual(
-            0.0,
+            (0.0, "a"),
             self.it_service._service_account_sort_key({"clientId": "a"}, "time_created"),
             "a service account without a creation time should keep sorting first when ascending",
         )
 
         # A timestamp we cannot parse falls back to the same default rather than raising.
         self.assertEqual(
-            float("inf"),
+            (float("inf"), ""),
             self.it_service._service_account_sort_key({"time_expires": "not-a-timestamp"}, "time_expires"),
             "an unparseable timestamp should fall back to the default instead of raising",
         )
@@ -1860,13 +1904,13 @@ class ITServiceTests(IdentityRequest):
         # come back out of numeric order.
         for unorderable in ("NaN", "Infinity", "-Infinity"):
             self.assertEqual(
-                float("inf"),
+                (float("inf"), ""),
                 self.it_service._service_account_sort_key({"time_expires": unorderable}, "time_expires"),
                 f'the non finite timestamp "{unorderable}" should fall back to the default',
             )
 
             self.assertEqual(
-                0.0,
+                (0.0, ""),
                 self.it_service._service_account_sort_key({"time_created": unorderable}, "time_created"),
                 f'the non finite timestamp "{unorderable}" should fall back to the default',
             )
@@ -1886,26 +1930,58 @@ class ITServiceTests(IdentityRequest):
             "a NaN timestamp should sort with the accounts of unknown expiry rather than disturbing the order",
         )
 
-        # Non timestamp fields keep their case insensitive string comparison.
+        # Non timestamp fields keep their case insensitive string comparison with a tiebreaker.
         self.assertEqual(
-            "myserviceaccount",
+            ("myserviceaccount", ""),
             self.it_service._service_account_sort_key({"name": "MyServiceAccount"}, "name"),
             "non timestamp fields should keep being compared as case insensitive strings",
         )
 
         self.assertEqual(
-            "",
+            ("", ""),
             self.it_service._service_account_sort_key({}, "name"),
             "a missing string field should keep sorting as an empty string",
         )
 
+    def test_service_account_sort_key_tiebreaker_on_tied_timestamps(self) -> None:
+        """Test that tied timestamps are broken by clientId for stable pagination."""
+        # All three service accounts have no time_expires → all tie at infinity.
+        # The tiebreaker on clientId should give a stable alphabetical order.
+        service_accounts = [
+            {"clientId": "charlie", "name": "c"},
+            {"clientId": "alice", "name": "a"},
+            {"clientId": "bob", "name": "b"},
+        ]
+
+        service_accounts.sort(key=lambda sa: self.it_service._service_account_sort_key(sa, "time_expires"))
+
+        self.assertEqual(
+            ["alice", "bob", "charlie"],
+            [sa["clientId"] for sa in service_accounts],
+            "when timestamps tie, the clientId tiebreaker should produce a stable sort order",
+        )
+
     def test_get_mock_service_accounts_includes_both_modes(self) -> None:
         """Test that the mocked IT responses contain both regular service accounts and service access tokens."""
+        # Use fixed IDs with known last hex chars so the test is deterministic.
+        # is_service_access_token checks client_id[-1] in "02468ace":
+        #   - IDs ending in even hex digit → SAT
+        #   - IDs ending in odd hex digit → regular
+        fixed_ids = [
+            "00000000-0000-0000-0000-000000000000",  # SAT (ends '0')
+            "00000000-0000-0000-0000-000000000001",  # regular (ends '1')
+            "00000000-0000-0000-0000-000000000002",  # SAT (ends '2')
+            "00000000-0000-0000-0000-000000000003",  # regular (ends '3')
+            "00000000-0000-0000-0000-00000000000a",  # SAT (ends 'a')
+            "00000000-0000-0000-0000-00000000000b",  # regular (ends 'b')
+            "00000000-0000-0000-0000-00000000000c",  # SAT (ends 'c')
+            "00000000-0000-0000-0000-00000000000d",  # regular (ends 'd')
+        ]
         principals = []
-        for _ in range(20):
+        for client_id in fixed_ids:
             principal = Principal()
-            principal.service_account_id = str(uuid.uuid4())
-            principal.username = f"service-account-{principal.service_account_id}"
+            principal.service_account_id = client_id
+            principal.username = f"service-account-{client_id}"
             principals.append(principal)
 
         # Call the function under test.
